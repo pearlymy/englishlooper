@@ -1,17 +1,26 @@
 {
   "expo": {
-    "name": "poux-tracking-task-2",
-    "slug": "poux-tracking-task-2",
+    "name": "English Looper",
+    "slug": "englishlooper",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "scheme": "englishlooper",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.english.englishlooper",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ],
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
+      "package": "com.english.englishlooper",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0a0a0f",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -20,6 +29,16 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "splash": {
+      "backgroundColor": "#0a0a0f",
+      "resizeMode": "contain"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "6b1f6da0-20e3-453b-8f9c-4b17e7669cc7"
+      }
+    },
+    "owner": "hieupt.484"
   }
 }

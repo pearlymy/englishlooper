@@ -1,0 +1,13 @@
+[
+  {
+    "origin": [
+      "https://englishlooper.web.app",
+      "https://englishlooper.firebaseapp.com",
+      "http://localhost:8081",
+      "http://localhost:19006"
+    ],
+    "method": ["GET", "HEAD"],
+    "maxAgeSeconds": 3600,
+    "responseHeader": ["Content-Type", "Content-Length", "Content-Range"]
+  }
+]
