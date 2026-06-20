@@ -1,133 +1,172 @@
 /**
- * WebAudioEngine — Thay thế expo-av trên Web
+ * WebAudioEngine — Hybrid: <audio> element + AudioBuffer
  * 
- * Tại sao?
- * - expo-av dùng HTML5 <audio> → seek trên MP3 lệch ±500ms
- * - Web Audio API dùng AudioBuffer → seek CHÍNH XÁC đến từng sample
- * - AudioBufferSourceNode.start(0, offset) = sample-accurate playback
+ * Architecture:
+ * - <audio> element: handles actual PLAYBACK
+ *   → Bypasses iOS silent mode (plays in "playback" category)
+ *   → Continues playing when browser is backgrounded
+ *   → Works with Media Session API (lock screen controls)
+ * 
+ * - AudioBuffer (Web Audio API): used ONLY for waveform analysis
+ *   → Sample-accurate amplitude data for visualization
+ *   → No longer used for playback
  */
 
 export class WebAudioEngine {
-  private audioContext: AudioContext | null = null;
+  // Playback via <audio> element
+  private audioElement: HTMLAudioElement | null = null;
+  private audioSrc: string = '';
+
+  // AudioBuffer for waveform analysis only
   private audioBuffer: AudioBuffer | null = null;
-  private source: AudioBufferSourceNode | null = null;
-  private gainNode: GainNode | null = null;
 
   private _isPlaying: boolean = false;
-  private _startedAt: number = 0;      // audioContext.currentTime khi bắt đầu phát
-  private _offsetSec: number = 0;      // Vị trí offset trong audio (seconds)
   private _playbackRate: number = 1.0;
   private _durationSec: number = 0;
 
   private positionInterval: ReturnType<typeof setInterval> | null = null;
   private onPositionUpdate: ((positionMs: number, isPlaying: boolean) => void) | null = null;
 
-  // Auto-unlock AudioContext on iOS Safari/Mobile Web on first user gesture
-  private unlockAudioContext(context: AudioContext) {
-    const unlock = () => {
-      if (context.state === 'suspended') {
-        context.resume().then(() => {
-          cleanUp();
-          console.log('[WebAudioEngine] AudioContext successfully unlocked!');
-        }).catch((err) => console.warn('[WebAudioEngine] Failed to unlock AudioContext:', err));
-      } else {
-        cleanUp();
-      }
-    };
-    const events = ['touchstart', 'touchend', 'click', 'keydown'];
-    const cleanUp = () => {
-      events.forEach(e => document.removeEventListener(e, unlock));
-    };
-    events.forEach(e => document.addEventListener(e, unlock, { passive: true }));
-  }
-
-  // Cross-browser iOS Safari compatible decodeAudioData wrapper
-  private decodeAudio(context: AudioContext, arrayBuffer: ArrayBuffer): Promise<AudioBuffer> {
-    return new Promise((resolve, reject) => {
-      try {
-        // webkitAudioContext in Safari iOS historically did not return a Promise
-        const promise = context.decodeAudioData(
-          arrayBuffer,
-          (buffer) => resolve(buffer),
-          (err) => reject(err || new Error('Lỗi giải mã âm thanh (decodeAudioData)'))
-        );
-        
-        if (promise && typeof promise.catch === 'function') {
-          promise.then(resolve).catch(reject);
-        }
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-
   /**
-   * Load audio file → decode thành AudioBuffer
+   * Load audio file → create <audio> element + decode AudioBuffer for waveform
    */
   async load(audioUri: string): Promise<number> {
     this.stop();
+    this.audioSrc = audioUri;
 
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    this.audioContext = new AudioContextClass();
-    this.gainNode = this.audioContext.createGain();
-    this.gainNode.connect(this.audioContext.destination);
-
-    // Register auto-unlocker
-    this.unlockAudioContext(this.audioContext);
-
-    const response = await fetch(audioUri);
-    const arrayBuffer = await response.arrayBuffer();
-    
-    // Decode with browser compatibility wrapper
-    this.audioBuffer = await this.decodeAudio(this.audioContext, arrayBuffer);
-    this._durationSec = this.audioBuffer.duration;
-
-    return Math.round(this._durationSec * 1000);
-  }
-
-  /**
-   * Phát từ vị trí hiện tại
-   */
-  play() {
-    if (!this.audioContext || !this.audioBuffer || this._isPlaying) return;
-
-    // Resume context nếu bị suspended (browser autoplay policy)
-    if (this.audioContext.state === 'suspended') {
-      this.audioContext.resume().catch((err) => console.warn('[WebAudioEngine] Failed to resume on play:', err));
+    // 1. Create <audio> element for playback
+    if (this.audioElement) {
+      this.audioElement.pause();
+      this.audioElement.removeAttribute('src');
+      this.audioElement.load();
     }
+    this.audioElement = new Audio();
+    this.audioElement.preload = 'auto';
+    this.audioElement.crossOrigin = 'anonymous';
 
-    this.source = this.audioContext.createBufferSource();
-    this.source.buffer = this.audioBuffer;
-    this.source.playbackRate.value = this._playbackRate;
-    this.source.connect(this.gainNode || this.audioContext.destination);
+    // iOS: enable inline playback, bypass silent mode
+    (this.audioElement as any).playsInline = true;
+    (this.audioElement as any).webkitPlaysInline = true;
 
-    // Bắt đầu từ offset hiện tại
-    this.source.start(0, this._offsetSec);
-    this._startedAt = this.audioContext.currentTime;
-    this._isPlaying = true;
+    // Set source
+    this.audioElement.src = audioUri;
 
-    // Track position
-    this.startPositionTracking();
+    // Wait for audio to be ready
+    await new Promise<void>((resolve, reject) => {
+      const el = this.audioElement!;
+      const onReady = () => {
+        el.removeEventListener('canplaythrough', onReady);
+        el.removeEventListener('error', onError);
+        resolve();
+      };
+      const onError = (e: any) => {
+        el.removeEventListener('canplaythrough', onReady);
+        el.removeEventListener('error', onError);
+        reject(new Error(`Audio load failed: ${e?.message || 'unknown error'}`));
+      };
+      el.addEventListener('canplaythrough', onReady, { once: true });
+      el.addEventListener('error', onError, { once: true });
+      el.load();
+    });
 
-    // Khi audio kết thúc tự nhiên
-    this.source.onended = () => {
+    this._durationSec = this.audioElement.duration || 0;
+
+    // Setup ended handler
+    this.audioElement.onended = () => {
       if (this._isPlaying) {
         this._isPlaying = false;
         this.stopPositionTracking();
         this.onPositionUpdate?.(this.getPositionMs(), false);
       }
     };
+
+    // 2. Decode AudioBuffer for waveform analysis (non-blocking)
+    this.decodeForWaveform(audioUri).catch(err => {
+      console.warn('[WebAudioEngine] Waveform decode failed (non-critical):', err);
+    });
+
+    // 3. Setup Media Session for lock screen controls
+    this.setupMediaSession();
+
+    return Math.round(this._durationSec * 1000);
+  }
+
+  /**
+   * Decode audio into AudioBuffer for waveform analysis only
+   */
+  private async decodeForWaveform(audioUri: string): Promise<void> {
+    try {
+      const response = await fetch(audioUri);
+      const arrayBuffer = await response.arrayBuffer();
+
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioContextClass();
+
+      this.audioBuffer = await new Promise<AudioBuffer>((resolve, reject) => {
+        const promise = ctx.decodeAudioData(
+          arrayBuffer,
+          (buffer) => resolve(buffer),
+          (err) => reject(err || new Error('Decode failed'))
+        );
+        if (promise && typeof promise.catch === 'function') {
+          promise.then(resolve).catch(reject);
+        }
+      });
+
+      await ctx.close().catch(() => {});
+      console.log('[WebAudioEngine] Waveform buffer decoded');
+    } catch (err) {
+      console.warn('[WebAudioEngine] Waveform decode error:', err);
+    }
+  }
+
+  /**
+   * Setup Media Session API for lock screen / notification controls
+   */
+  private setupMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: 'English Looper',
+        artist: 'Shadowing Practice',
+      });
+
+      navigator.mediaSession.setActionHandler('play', () => this.play());
+      navigator.mediaSession.setActionHandler('pause', () => this.pause());
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (details.seekTime != null) {
+          this.seekTo(details.seekTime * 1000);
+        }
+      });
+    } catch (err) {
+      console.warn('[WebAudioEngine] Media Session setup failed:', err);
+    }
+  }
+
+  /**
+   * Phát từ vị trí hiện tại
+   */
+  play() {
+    if (!this.audioElement || this._isPlaying) return;
+
+    this.audioElement.playbackRate = this._playbackRate;
+    const playPromise = this.audioElement.play();
+    if (playPromise) {
+      playPromise.catch(err => {
+        console.warn('[WebAudioEngine] Play failed:', err);
+      });
+    }
+    this._isPlaying = true;
+    this.startPositionTracking();
   }
 
   /**
    * Tạm dừng
    */
   pause() {
-    if (!this._isPlaying || !this.audioContext) return;
-
-    // Lưu vị trí hiện tại trước khi dừng
-    this._offsetSec = this.getCurrentOffsetSec();
-    this.stopSource();
+    if (!this._isPlaying || !this.audioElement) return;
+    this.audioElement.pause();
     this._isPlaying = false;
     this.stopPositionTracking();
     this.onPositionUpdate?.(this.getPositionMs(), false);
@@ -137,19 +176,12 @@ export class WebAudioEngine {
    * Seek đến vị trí chính xác (ms)
    */
   seekTo(positionMs: number) {
+    if (!this.audioElement) return;
+
     const wasPlaying = this._isPlaying;
+    const targetSec = Math.max(0, Math.min(positionMs / 1000, this._durationSec));
 
-    if (wasPlaying) {
-      this.stopSource();
-      this._isPlaying = false;
-    }
-
-    this._offsetSec = Math.max(0, Math.min(positionMs / 1000, this._durationSec));
-
-    if (wasPlaying) {
-      this.play();
-    }
-
+    this.audioElement.currentTime = targetSec;
     this.onPositionUpdate?.(positionMs, wasPlaying);
   }
 
@@ -157,20 +189,17 @@ export class WebAudioEngine {
    * Lấy vị trí hiện tại (ms)
    */
   getPositionMs(): number {
-    return Math.round(this.getCurrentOffsetSec() * 1000);
+    if (!this.audioElement) return 0;
+    return Math.round(this.audioElement.currentTime * 1000);
   }
 
   /**
    * Đổi tốc độ phát
    */
   setPlaybackRate(rate: number) {
-    if (this._isPlaying && this.audioContext) {
-      this._offsetSec = this.getCurrentOffsetSec();
-      this._startedAt = this.audioContext.currentTime;
-    }
     this._playbackRate = rate;
-    if (this.source && this._isPlaying) {
-      this.source.playbackRate.value = rate;
+    if (this.audioElement) {
+      this.audioElement.playbackRate = rate;
     }
   }
 
@@ -200,11 +229,15 @@ export class WebAudioEngine {
    */
   async unload() {
     this.stop();
-    if (this.audioContext) {
-      await this.audioContext.close().catch(() => {});
-      this.audioContext = null;
+    if (this.audioElement) {
+      this.audioElement.pause();
+      this.audioElement.removeAttribute('src');
+      this.audioElement.load();
+      this.audioElement.onended = null;
+      this.audioElement = null;
     }
     this.audioBuffer = null;
+    this.audioSrc = '';
     this.onPositionUpdate = null;
   }
 
@@ -222,7 +255,7 @@ export class WebAudioEngine {
     if (totalSamples <= 0) return new Array(numPoints).fill(0.1);
 
     try {
-      const channelData = this.audioBuffer.getChannelData(0); // Dùng channel đầu tiên (mono/left)
+      const channelData = this.audioBuffer.getChannelData(0);
       const points: number[] = [];
       const samplesPerPoint = Math.max(1, Math.floor(totalSamples / numPoints));
 
@@ -242,7 +275,6 @@ export class WebAudioEngine {
         points.push(rms);
       }
 
-      // Chuẩn hóa về khoảng [0.15, 1.0] để hiển thị đẹp
       const maxVal = Math.max(...points, 0.01);
       return points.map(v => 0.15 + (v / maxVal) * 0.85);
     } catch {
@@ -252,27 +284,15 @@ export class WebAudioEngine {
 
   // ─── Internal ───
 
-  private getCurrentOffsetSec(): number {
-    if (!this._isPlaying || !this.audioContext) return this._offsetSec;
-    const elapsed = (this.audioContext.currentTime - this._startedAt) * this._playbackRate;
-    return Math.min(this._offsetSec + elapsed, this._durationSec);
-  }
-
   private stopSource() {
-    if (this.source) {
-      try {
-        this.source.onended = null;
-        this.source.stop();
-      } catch {}
-      this.source.disconnect();
-      this.source = null;
+    if (this.audioElement) {
+      this.audioElement.pause();
     }
   }
 
   private stop() {
     this.stopSource();
     this._isPlaying = false;
-    this._offsetSec = 0;
     this.stopPositionTracking();
   }
 

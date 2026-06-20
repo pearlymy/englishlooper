@@ -30,7 +30,7 @@ export class AITranslationService {
     const allResults: TranslationResult[] = [];
     for (let i = 0; i < batches.length; i++) {
       onProgress?.(`Đang dịch & phiên âm nhóm ${i + 1}/${batches.length}...`);
-      const batchResults = await this.processBatchWithRetry(batches[i], apiKey, 3);
+      const batchResults = await this.processBatchSafe(batches[i], apiKey);
       allResults.push(...batchResults);
 
       // Delay 500ms giữa các batch để tránh rate limit
@@ -43,34 +43,23 @@ export class AITranslationService {
   }
 
   /**
-   * Xử lý 1 batch với retry tự động khi bị rate limit (429)
+   * Xử lý 1 batch — nếu lỗi (bao gồm rate limit 429) thì skip, không retry
    */
-  private static async processBatchWithRetry(
+  private static async processBatchSafe(
     batch: { index: number; text: string }[],
-    apiKey: string,
-    maxRetries: number
+    apiKey: string
   ): Promise<TranslationResult[]> {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        return await this.processBatch(batch, apiKey);
-      } catch (error: any) {
-        const isRateLimit = error?.message?.includes('429');
-        if (isRateLimit && attempt < maxRetries) {
-          const waitSec = attempt * 5; // 5s, 10s, 15s
-          console.warn(`[AIService] Rate limited. Waiting ${waitSec}s before retry ${attempt + 1}/${maxRetries}...`);
-          await new Promise(resolve => setTimeout(resolve, waitSec * 1000));
-          continue;
-        }
-        console.error(`[AIService] Batch failed after ${attempt} attempts:`, error);
-        // Return empty results so we don't break the whole flow
-        return batch.map(s => ({
-          index: s.index,
-          ipa: '',
-          vietnamese: ''
-        }));
-      }
+    try {
+      return await this.processBatch(batch, apiKey);
+    } catch (error: any) {
+      console.warn(`[AIService] Batch failed (skipping):`, error?.message || error);
+      // Return empty results so we don't break the whole flow
+      return batch.map(s => ({
+        index: s.index,
+        ipa: '',
+        vietnamese: ''
+      }));
     }
-    return [];
   }
 
   private static async processBatch(

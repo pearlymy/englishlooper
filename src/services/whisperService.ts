@@ -155,7 +155,7 @@ export class WhisperService {
     const segments: WhisperSegment[] = (data.segments || []).map((seg: any) => ({
       start: seg.start,
       end: seg.end,
-      text: (seg.text || '').trim(),
+      text: this.fixMissingPunctuation((seg.text || '').trim()),
     }));
 
     console.log(`[Whisper] ${segments.length} sentences detected`);
@@ -289,7 +289,7 @@ export class WhisperService {
         allSegments.push({
           start: seg.start + chunkStart,
           end: seg.end + chunkStart,
-          text: (seg.text || '').trim(),
+          text: this.fixMissingPunctuation((seg.text || '').trim()),
         });
       }
     }
@@ -373,15 +373,21 @@ export class WhisperService {
   private static mergeIntoSentences(segments: WhisperSegment[]): WhisperSegment[] {
     if (segments.length <= 1) return segments;
 
-    const SENTENCES_PER_SEGMENT = 2;  // Gộp 2 câu thành 1 segment
-    const MAX_SENTENCE_SEC = 20;      // Tối đa 20s
+    const SENTENCES_PER_SEGMENT = 1;  // Mỗi segment = 1 câu
+    const MAX_SENTENCE_SEC = 15;      // Tối đa 15s
     const SENTENCE_ENDERS = /[.!?。？！…]+\s*$/;  // Dấu kết thúc câu
+
+    // Đếm số câu thực sự trong text (dựa trên dấu câu)
+    const countSentences = (text: string): number => {
+      const matches = text.match(/[.!?。？！…]+/g);
+      return matches ? matches.length : 0;
+    };
 
     const result: WhisperSegment[] = [];
     let accStart = segments[0].start;
     let accEnd = segments[0].end;
     let accText = segments[0].text;
-    let sentenceCount = SENTENCE_ENDERS.test(segments[0].text) ? 1 : 0;
+    let sentenceCount = countSentences(segments[0].text);
 
     for (let i = 1; i < segments.length; i++) {
       const seg = segments[i];
@@ -392,23 +398,21 @@ export class WhisperService {
         result.push({
           start: accStart,
           end: accEnd,
-          text: accText.trim(),
+          text: this.fixMissingPunctuation(accText.trim()),
         });
         accStart = seg.start;
         accEnd = seg.end;
         accText = seg.text;
-        sentenceCount = SENTENCE_ENDERS.test(seg.text) ? 1 : 0;
+        sentenceCount = countSentences(seg.text);
       } else {
         accEnd = seg.end;
         accText = accText + ' ' + seg.text;
-        if (SENTENCE_ENDERS.test(seg.text)) {
-          sentenceCount++;
-        }
+        sentenceCount += countSentences(seg.text);
       }
     }
 
     // Đẩy câu cuối
-    result.push({ start: accStart, end: accEnd, text: accText.trim() });
+    result.push({ start: accStart, end: accEnd, text: this.fixMissingPunctuation(accText.trim()) });
 
     // Gộp câu cuối nếu quá ngắn (< 2s)
     if (result.length > 1) {
@@ -416,12 +420,26 @@ export class WhisperService {
       if (last.end - last.start < 2) {
         const prev = result[result.length - 2];
         prev.end = last.end;
-        prev.text = (prev.text + ' ' + last.text).trim();
+        prev.text = this.fixMissingPunctuation((prev.text + ' ' + last.text).trim());
         result.pop();
       }
     }
 
     console.log(`[Whisper] Merged ${segments.length} phrases → ${result.length} segments (${SENTENCES_PER_SEGMENT} sentences each)`);
     return result;
+  }
+
+  /**
+   * Fix missing punctuation: chèn dấu "." khi phát hiện chữ viết hoa sau chữ thường
+   * mà không có dấu câu phân cách.
+   * Ví dụ: "startups She is" → "startups. She is"
+   */
+  private static fixMissingPunctuation(text: string): string {
+    if (!text) return text;
+    // Match: lowercase letter + space + uppercase letter (new sentence without punctuation)
+    // Exclude common patterns like "I" standalone, abbreviations
+    return text.replace(/([a-z]) ([A-Z])/g, (match, before, after) => {
+      return `${before}. ${after}`;
+    });
   }
 }

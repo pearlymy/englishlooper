@@ -311,11 +311,11 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
         if (!active) return;
         setIsAudioLoading(false);
 
-        if (initialProject.activeSegmentId) {
-          const resumeSeg = segments.find(s => s.id === initialProject.activeSegmentId);
-          if (resumeSeg && audioServiceRef.current) {
-            audioServiceRef.current.selectSegment(resumeSeg);
-          }
+        // Resume at T+1: first segment that is NOT mastered (next to learn)
+        if (segments.length > 0 && audioServiceRef.current) {
+          const firstUnmastered = segments.find(s => s.status !== 'mastered');
+          const resumeSeg = firstUnmastered || segments[0]; // If all mastered, go to first
+          audioServiceRef.current.selectSegment(resumeSeg);
         }
       } catch (err: any) {
         if (!active) return;

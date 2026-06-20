@@ -111,7 +111,14 @@ export class FirebaseSyncService {
         return;
       }
 
-      await uploadBytes(storageRef, blob);
+      const uploadResult = await uploadBytes(storageRef, blob);
+      // Save md5Hash locally so this device won't re-download the same file
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        try {
+          const meta = await getMetadata(storageRef);
+          if (meta.md5Hash) localStorage.setItem(`audio_hash_${projectId}`, meta.md5Hash);
+        } catch (_) {}
+      }
       console.log(`Successfully uploaded audio file for project ${projectId} to Firebase Storage.`);
     } catch (err) {
       console.error(`Error uploading audio file to Firebase Storage for project ${projectId}:`, err);
@@ -259,47 +266,74 @@ export class FirebaseSyncService {
   // --- LAZY AUDIO RESOLVER ---
 
   static async resolveAndDownloadAudio(projectId: string, currentUri: string): Promise<string> {
-    // 1. Always check and resolve local files first, regardless of auth state,
-    // which handles IndexedDB on Web and dynamically prepending the fresh FileSystem.documentDirectory on Mobile.
+    const uid = this.getUserId();
+    const isOnline = uid && this.isOnline();
+    const hashKey = `audio_hash_${projectId}`;
+
+    // 1. Check if local file exists
+    let localBlob: Blob | null = null;
+    let localPath: string | null = null;
     try {
       if (Platform.OS === 'web') {
-        const exists = await DBService.getAudio(projectId);
-        if (exists) {
-          return URL.createObjectURL(exists);
-        }
+        localBlob = await DBService.getAudio(projectId);
       } else {
-        const localPath = `${FileSystem.documentDirectory}${projectId}.mp3`;
-        const info = await FileSystem.getInfoAsync(localPath);
-        if (info.exists) {
-          return localPath;
-        }
+        const path = `${FileSystem.documentDirectory}${projectId}.mp3`;
+        const info = await FileSystem.getInfoAsync(path);
+        if (info.exists) localPath = path;
       }
     } catch (err) {
       console.warn(`Local file resolution failed for project ${projectId}:`, err);
     }
 
-    // 2. Try to download from Firebase Storage if not found locally and user is logged in
-    const uid = this.getUserId();
-    if (uid && this.isOnline()) {
+    const hasLocal = Platform.OS === 'web' ? !!localBlob : !!localPath;
+
+    // 2. If online, check if cloud version is newer (compare md5Hash)
+    if (isOnline) {
       try {
-        console.log(`Downloading audio file from Firebase Storage for project: ${projectId}`);
         const storageRef = ref(storage, `users/${uid}/projects/${projectId}/audio.mp3`);
+        const metadata = await getMetadata(storageRef);
+        const cloudHash = metadata.md5Hash || '';
+        const localHash = typeof window !== 'undefined' ? (localStorage.getItem(hashKey) || '') : '';
+
+        if (hasLocal && cloudHash && cloudHash === localHash) {
+          // Local file matches cloud — use local (no re-download needed)
+          console.log(`Audio for project ${projectId}: local matches cloud (hash OK)`);
+          if (Platform.OS === 'web') {
+            return URL.createObjectURL(localBlob!);
+          } else {
+            return localPath!;
+          }
+        }
+
+        // Hash mismatch or no local hash → download from cloud
+        console.log(`Downloading audio from Firebase Storage for project: ${projectId} (${hasLocal ? 'file changed' : 'not cached'})`);
 
         if (Platform.OS === 'web') {
-          // Use Firebase SDK getBlob() to bypass CORS restrictions
           const blob = await getBlob(storageRef);
           await DBService.saveAudio(projectId, blob);
-          console.log(`Successfully downloaded audio from Firebase Storage for project: ${projectId}`);
+          if (cloudHash) localStorage.setItem(hashKey, cloudHash);
+          console.log(`Successfully downloaded & cached audio for project: ${projectId}`);
           return URL.createObjectURL(blob);
         } else {
           const downloadUrl = await getDownloadURL(storageRef);
-          const localPath = `${FileSystem.documentDirectory}${projectId}.mp3`;
-          await FileSystem.downloadAsync(downloadUrl, localPath);
-          return localPath;
+          const dlPath = `${FileSystem.documentDirectory}${projectId}.mp3`;
+          await FileSystem.downloadAsync(downloadUrl, dlPath);
+          // Note: on native, we don't have localStorage but can use AsyncStorage if needed
+          return dlPath;
         }
       } catch (err) {
-        console.error(`Error downloading audio file from Firebase Storage for project ${projectId}:`, err);
+        // If cloud check fails but we have local, use local as fallback
+        if (hasLocal) {
+          console.warn(`Cloud check failed for project ${projectId}, using local fallback:`, err);
+          if (Platform.OS === 'web') return URL.createObjectURL(localBlob!);
+          return localPath!;
+        }
+        console.error(`Error downloading audio from Firebase Storage for project ${projectId}:`, err);
       }
+    } else if (hasLocal) {
+      // Offline but have local — use it
+      if (Platform.OS === 'web') return URL.createObjectURL(localBlob!);
+      return localPath!;
     }
 
     throw new Error('AUDIO_NOT_FOUND: Tệp âm thanh cục bộ không tìm thấy và không thể tải xuống từ đám mây. Vui lòng chọn lại tệp âm thanh.');
