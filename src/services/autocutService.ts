@@ -84,7 +84,7 @@ export class AutocutService {
     onProgress?.('🤖 Đang phân tích câu từ âm thanh...');
 
     const SENTENCE_END_REGEX = /[.!?。？！…]+$/;
-    const MAX_WORDS_PER_SENTENCE = 15; // Nếu không có dấu câu, cắt sau 15 từ
+    const MAX_WORDS_PER_SENTENCE = 10; // Nếu không có dấu câu, cắt sau 10 từ (~1 câu tiếng Anh)
 
     // Bước 1: Xây dựng danh sách câu từ word-level timestamps
     const sentences: { start: number; end: number; text: string }[] = [];
@@ -103,9 +103,9 @@ export class AutocutService {
         const tooManyWords = sentenceWords.length >= MAX_WORDS_PER_SENTENCE;
         const isLastWord = i === whisperWords.length - 1;
 
-        // Kiểm tra có pause lớn (>0.5s) giữa từ hiện tại và từ tiếp theo
+        // Kiểm tra có pause (>0.3s) giữa từ hiện tại và từ tiếp theo
         const nextWord = whisperWords[i + 1];
-        const hasPause = nextWord ? (nextWord.start - w.end) > 0.5 : false;
+        const hasPause = nextWord ? (nextWord.start - w.end) > 0.3 : false;
 
         if (isSentenceEnd || tooManyWords || isLastWord || hasPause) {
           sentences.push({
