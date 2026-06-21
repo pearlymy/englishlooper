@@ -209,7 +209,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
       setSegments(prevSegs =>
         prevSegs.map(seg =>
           seg.id === prevId
-            ? { ...seg, studyCount: (seg.studyCount || 0) + 1 }
+            ? { ...seg, studyCount: (seg.studyCount || 0) + 1, status: 'mastered' }
             : seg
         )
       );
@@ -327,7 +327,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
 
         // Resume at T+1: first segment that is NOT mastered (next to learn)
         if (segments.length > 0 && audioServiceRef.current) {
-          const firstUnmastered = segments.find(s => s.status !== 'mastered');
+          const firstUnmastered = segments.find(s => s.status !== 'mastered' && (!s.studyCount || s.studyCount === 0));
           const resumeSeg = firstUnmastered || segments[0]; // If all mastered, go to first
           audioServiceRef.current.selectSegment(resumeSeg);
         }
@@ -924,7 +924,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     setSegments(prevSegs =>
       prevSegs.map(seg =>
         seg.id === activeSegment.id
-          ? { ...seg, dictationAccuracy: pct }
+          ? { ...seg, dictationAccuracy: pct, status: pct === 100 ? 'mastered' : seg.status }
           : seg
       )
     );
@@ -966,78 +966,53 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
       inputWords.length === targetWords.length &&
       targetWords.every((tWord, idx) => cleanWord(inputWords[idx] || '') === cleanWord(tWord));
 
-    const wordRender = targetWords.map((tWord, idx) => {
-      const cleanTarget = cleanWord(tWord);
-      
-      if (showDictationAnswer) {
-        return (
-          <Text key={idx} style={[s.dictationWord, s.dictationWordHint]}>
-            {tWord}{' '}
-          </Text>
-        );
-      }
-
-      if (idx < inputWords.length) {
-        const cleanInput = cleanWord(inputWords[idx]);
-        if (isDictationChecked) {
-          if (cleanTarget === cleanInput) {
+    const wordRender = (showDictationAnswer || isDictationChecked) ? (
+      <View style={s.dictationWordsWrap}>
+        {targetWords.map((tWord, idx) => {
+          const cleanTarget = cleanWord(tWord);
+          
+          if (showDictationAnswer) {
             return (
-              <Text key={idx} style={[s.dictationWord, s.dictationWordCorrect]}>
+              <Text key={idx} style={[s.dictationWord, s.dictationWordHint]}>
                 {tWord}{' '}
               </Text>
             );
+          }
+
+          if (idx < inputWords.length) {
+            const cleanInput = cleanWord(inputWords[idx]);
+            if (cleanTarget === cleanInput) {
+              return (
+                <Text key={idx} style={[s.dictationWord, s.dictationWordCorrect]}>
+                  {tWord}{' '}
+                </Text>
+              );
+            } else {
+              return (
+                <Text key={idx} style={[s.dictationWord, s.dictationWordIncorrect]}>
+                  {inputWords[idx] || '?'}{' '}
+                </Text>
+              );
+            }
           } else {
+            const strippedWord = tWord.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
+            const punctuation = tWord.substring(strippedWord.length);
+            const underscores = '_'.repeat(Math.max(1, strippedWord.length));
             return (
-              <Text key={idx} style={[s.dictationWord, s.dictationWordIncorrect]}>
-                {inputWords[idx] || '?'}{' '}
+              <Text key={idx} style={[s.dictationWord, s.dictationWordMissing]}>
+                {underscores}{punctuation}{' '}
               </Text>
             );
           }
-        } else {
-          // Render plain white if not checked yet
-          return (
-            <Text key={idx} style={[s.dictationWord, { color: '#fff' }]}>
-              {inputWords[idx]}{' '}
-            </Text>
-          );
-        }
-      } else {
-        const strippedWord = tWord.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
-        const punctuation = tWord.substring(strippedWord.length);
-        const underscores = '_'.repeat(Math.max(1, strippedWord.length));
-        return (
-          <Text key={idx} style={[s.dictationWord, s.dictationWordMissing]}>
-            {underscores}{punctuation}{' '}
-          </Text>
-        );
-      }
-    });
+        })}
+      </View>
+    ) : null;
 
     const correctWordsCount = targetWords.filter((tWord, idx) => idx < inputWords.length && cleanWord(inputWords[idx]) === cleanWord(tWord)).length;
     const pct = targetWords.length > 0 ? Math.round((correctWordsCount / targetWords.length) * 100) : 0;
 
     return (
       <View style={{ width: '100%', alignItems: 'center' }}>
-        <View style={s.dictationWordsWrap}>
-          {wordRender}
-        </View>
-
-        {isDictationChecked && (
-          <View style={[
-            s.dictationScoreBox,
-            pct === 100 ? s.dictationScoreBoxPerfect : s.dictationScoreBoxNormal
-          ]}>
-            <Text style={[
-              s.dictationScoreText,
-              pct === 100 ? s.dictationScoreTextPerfect : s.dictationScoreTextNormal
-            ]}>
-              {pct === 100 
-                ? `✨ HOÀN HẢO: 100% đúng (${correctWordsCount}/${targetWords.length} từ) ✨`
-                : `Kết quả: ${pct}% đúng (${correctWordsCount}/${targetWords.length} từ) — Hãy sửa các từ màu đỏ/thiếu nhé!`}
-            </Text>
-          </View>
-        )}
-
         <TextInput
           style={s.dictationInput}
           placeholder="Nghe và gõ lại câu tại đây..."
@@ -1072,6 +1047,28 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
             <Text style={s.dictationActionBtnText}>🧹 Xóa</Text>
           </TouchableOpacity>
         </View>
+
+        {wordRender && (
+          <View style={{ marginTop: 16, width: '100%' }}>
+            {wordRender}
+          </View>
+        )}
+
+        {isDictationChecked && (
+          <View style={[
+            s.dictationScoreBox,
+            pct === 100 ? s.dictationScoreBoxPerfect : s.dictationScoreBoxNormal
+          ]}>
+            <Text style={[
+              s.dictationScoreText,
+              pct === 100 ? s.dictationScoreTextPerfect : s.dictationScoreTextNormal
+            ]}>
+              {pct === 100 
+                ? `✨ HOÀN HẢO: 100% đúng (${correctWordsCount}/${targetWords.length} từ) ✨`
+                : `Kết quả: ${pct}% đúng (${correctWordsCount}/${targetWords.length} từ) — Hãy sửa các từ màu đỏ/thiếu nhé!`}
+            </Text>
+          </View>
+        )}
       </View>
     );
   };
@@ -1089,7 +1086,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     setSegments(prevSegs =>
       prevSegs.map(seg =>
         seg.id === activeSegment.id
-          ? { ...seg, translationAccuracy: Math.max(seg.translationAccuracy || 0, pct) }
+          ? { ...seg, translationAccuracy: Math.max(seg.translationAccuracy || 0, pct), status: pct === 100 ? 'mastered' : seg.status }
           : seg
       )
     );
@@ -1216,26 +1213,6 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
           </Text>
         </View>
 
-        {/* Answer area (word-by-word check or show answer) */}
-        {wordRender}
-
-        {/* Score */}
-        {isTranslationChecked && !showTranslationAnswer && (
-          <View style={[
-            s.dictationScoreBox,
-            pct === 100 ? s.dictationScoreBoxPerfect : s.dictationScoreBoxNormal
-          ]}>
-            <Text style={[
-              s.dictationScoreText,
-              pct === 100 ? s.dictationScoreTextPerfect : s.dictationScoreTextNormal
-            ]}>
-              {pct === 100
-                ? `✨ HOÀN HẢO: 100% đúng (${correctWordsCount}/${targetWords.length} từ) ✨`
-                : `Kết quả: ${pct}% đúng (${correctWordsCount}/${targetWords.length} từ) — Hãy sửa các từ sai nhé!`}
-            </Text>
-          </View>
-        )}
-
         {/* Input */}
         <TextInput
           style={s.dictationInput}
@@ -1272,6 +1249,30 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
             <Text style={s.dictationActionBtnText}>🧹 Xóa</Text>
           </TouchableOpacity>
         </View>
+
+        {/* Answer area (word-by-word check or show answer) */}
+        {wordRender && (
+          <View style={{ marginTop: 16, width: '100%' }}>
+            {wordRender}
+          </View>
+        )}
+
+        {/* Score */}
+        {isTranslationChecked && !showTranslationAnswer && (
+          <View style={[
+            s.dictationScoreBox,
+            pct === 100 ? s.dictationScoreBoxPerfect : s.dictationScoreBoxNormal
+          ]}>
+            <Text style={[
+              s.dictationScoreText,
+              pct === 100 ? s.dictationScoreTextPerfect : s.dictationScoreTextNormal
+            ]}>
+              {pct === 100
+                ? `✨ HOÀN HẢO: 100% đúng (${correctWordsCount}/${targetWords.length} từ) ✨`
+                : `Kết quả: ${pct}% đúng (${correctWordsCount}/${targetWords.length} từ) — Hãy sửa các từ sai nhé!`}
+            </Text>
+          </View>
+        )}
       </View>
     );
   };

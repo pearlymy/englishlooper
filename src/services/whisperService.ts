@@ -46,13 +46,22 @@ export class WhisperService {
    */
   static async getApiKey(): Promise<string | null> {
     try {
-      const stored = await AsyncStorage.getItem(API_KEY_STORAGE);
+      let stored = await AsyncStorage.getItem(API_KEY_STORAGE);
+      const oldExpiredKey = process.env.EXPO_PUBLIC_GROQ_OLD_KEY || '';
+      const newDefaultKey = process.env.EXPO_PUBLIC_GROQ_API_KEY || '';
+
+      // Force-migrate: replace old expired key with new valid key
+      if (stored === oldExpiredKey && newDefaultKey) {
+        await AsyncStorage.setItem(API_KEY_STORAGE, newDefaultKey);
+        stored = newDefaultKey;
+      }
+
       if (stored) return stored;
+
       // Fallback: check env variable and auto-save
-      const envKey = (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_GROQ_API_KEY) || '';
-      if (envKey) {
-        await AsyncStorage.setItem(API_KEY_STORAGE, envKey);
-        return envKey;
+      if (newDefaultKey) {
+        await AsyncStorage.setItem(API_KEY_STORAGE, newDefaultKey);
+        return newDefaultKey;
       }
       return null;
     } catch {
