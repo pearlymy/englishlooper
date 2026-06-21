@@ -24,6 +24,7 @@ import { StorageService } from '../services/storageService';
 import { WhisperService } from '../services/whisperService';
 import { AITranslationService } from '../services/aiTranslationService';
 import { FirebaseSyncService } from '../services/firebaseSyncService';
+import { showAlert } from '../utils/alert';
 
 interface PlayerScreenProps {
   project: Project;
@@ -491,7 +492,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
       setShowFilePickerModal(false);
     } catch (err: any) {
       console.error('[PlayerScreen] Reload audio failed:', err);
-      Alert.alert('Lỗi', `Không thể nạp tệp âm thanh đã chọn.\n${err.message || err}`);
+      showAlert('Lỗi', `Không thể nạp tệp âm thanh đã chọn.\n${err.message || err}`);
     } finally {
       setIsReloadingAudio(false);
     }
@@ -512,7 +513,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
       // Resolve API key
       let apiKey = await WhisperService.getApiKey();
       if (!apiKey) {
-        Alert.alert('Thiếu API Key', 'Cần API Key để AI cắt câu lại. Vào Settings để thêm.');
+        showAlert('Thiếu API Key', 'Cần API Key để AI cắt câu lại. Vào Settings để thêm.');
         setIsRetranscribing(false);
         return;
       }
@@ -571,10 +572,10 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
         audioServiceRef.current.updateSegments(finalSegments);
       }
 
-      Alert.alert('✅ Thành công', `AI đã cắt lại ${finalSegments.length} câu với timestamps mới.`);
+      showAlert('✅ Thành công', `AI đã cắt lại ${finalSegments.length} câu với timestamps mới.`);
     } catch (err: any) {
       console.error('[PlayerScreen] Retranscribe failed:', err);
-      Alert.alert('Lỗi', `AI cắt câu lại thất bại: ${err.message || 'Vui lòng thử lại.'}`);
+      showAlert('Lỗi', `AI cắt câu lại thất bại: ${err.message || 'Vui lòng thử lại.'}`);
     } finally {
       setIsRetranscribing(false);
       setRetranscribeProgress('');
@@ -666,7 +667,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     if (!activeSegmentId) return;
     const i = segments.findIndex(s => s.id === activeSegmentId);
     const next = segments[i + 1];
-    if (!next) { Alert.alert('Không thể ghép', 'Đây là câu cuối.'); return; }
+    if (!next) { showAlert('Không thể ghép', 'Đây là câu cuối.'); return; }
     if (!IS_WEB) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     const updated = AutocutService.mergeSegments(segments, activeSegmentId, next.id);
     setSegments(updated);
@@ -680,7 +681,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     const transcript = activeSegment.transcript || '';
     const words = transcript.trim().split(/\s+/).filter(w => w.length > 0);
     if (words.length < 2) {
-      Alert.alert('Không thể tách', 'Câu cần có ít nhất 2 từ để tách.');
+      showAlert('Không thể tách', 'Câu cần có ít nhất 2 từ để tách.');
       return;
     }
     setIsSplittingWords(true);
@@ -702,7 +703,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     const splitTimeMs = activeSegment.startTimeMs + Math.round(ratio * (activeSegment.endTimeMs - activeSegment.startTimeMs));
 
     if (splitTimeMs - activeSegment.startTimeMs < 300 || activeSegment.endTimeMs - splitTimeMs < 300) {
-      Alert.alert('Không thể tách', 'Phần tách quá ngắn (< 300ms).');
+      showAlert('Không thể tách', 'Phần tách quá ngắn (< 300ms).');
       return;
     }
 
@@ -721,7 +722,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
 
     const key = await WhisperService.getApiKey();
     if (!key) {
-      Alert.alert(
+      showAlert(
         'Thiếu API Key',
         'Vui lòng cấu hình API Key ở màn hình Import trước để sử dụng tính năng này.'
       );
@@ -738,7 +739,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
       })).filter(s => s.text.length > 0);
 
       if (sentencesToTranslate.length === 0) {
-        Alert.alert('Không có dữ liệu', 'Không tìm thấy câu nào có văn bản transcript để dịch.');
+        showAlert('Không có dữ liệu', 'Không tìm thấy câu nào có văn bản transcript để dịch.');
         setIsTranslating(false);
         return;
       }
@@ -773,10 +774,10 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
         ...updatedFields
       });
 
-      Alert.alert('✅ Thành công', 'Đã dịch nghĩa và tạo phiên âm IPA hoàn tất cho tất cả các câu!');
+      showAlert('✅ Thành công', 'Đã dịch nghĩa và tạo phiên âm IPA hoàn tất cho tất cả các câu!');
     } catch (err) {
       console.error(err);
-      Alert.alert('Thất bại', 'Không thể hoàn thành dịch thuật AI. Vui lòng kiểm tra kết nối.');
+      showAlert('Thất bại', 'Không thể hoàn thành dịch thuật AI. Vui lòng kiểm tra kết nối.');
     } finally {
       setIsTranslating(false);
     }

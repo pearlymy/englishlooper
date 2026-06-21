@@ -18,6 +18,7 @@ import { StorageService } from '../services/storageService';
 import { auth } from '../services/firebaseConfig';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { FirebaseSyncService } from '../services/firebaseSyncService';
+import { showAlert } from '../utils/alert';
 
 interface HomeScreenProps {
   projects: Project[];
@@ -189,7 +190,7 @@ export default function HomeScreen({
       await FirebaseSyncService.syncDownAll();
       onRefresh();
       setIsAuthModalVisible(false);
-      Alert.alert('Thành công', 'Đồng bộ dữ liệu đám mây hoàn tất!');
+      showAlert('Thành công', 'Đồng bộ dữ liệu đám mây hoàn tất!');
     } catch (err: any) {
       console.error(err);
       setAuthError('Lỗi đồng bộ dữ liệu: ' + (err.message || err));
@@ -243,18 +244,7 @@ export default function HomeScreen({
   }, [onRefresh, loadFolders, currentUser]);
 
   const handleDelete = (project: Project) => {
-    if (Platform.OS === 'web') {
-      const ok = window.confirm(`Bạn chắc chắn muốn xóa "${project.title}"?`);
-      if (ok) {
-        StorageService.deleteProject(project.id).then(async () => {
-          await FirebaseSyncService.deleteProject(project.id);
-          onRefresh();
-        });
-      }
-      return;
-    }
-
-    Alert.alert(
+    showAlert(
       'Xóa bài học',
       `Bạn chắc chắn muốn xóa "${project.title}"?`,
       [
@@ -275,7 +265,7 @@ export default function HomeScreen({
   const handleCreateFolder = async () => {
     const name = newFolderName.trim();
     if (!name) {
-      Alert.alert('Lỗi', 'Vui lòng nhập tên thư mục.');
+      showAlert('Lỗi', 'Vui lòng nhập tên thư mục.');
       return;
     }
 
@@ -308,31 +298,14 @@ export default function HomeScreen({
       await loadFolders();
     } catch (err) {
       console.error(err);
-      Alert.alert('Lỗi', 'Có lỗi xảy ra khi tạo thư mục.');
+      showAlert('Lỗi', 'Có lỗi xảy ra khi tạo thư mục.');
     } finally {
       setIsSubmittingFolder(false);
     }
   };
 
   const handleDeleteFolder = (folder: Folder) => {
-    if (Platform.OS === 'web') {
-      const ok = window.confirm(`Bạn chắc chắn muốn xóa thư mục "${folder.name}"? Hành động này sẽ xóa tất cả các bài học bên trong thư mục này.`);
-      if (ok) {
-        StorageService.deleteFolder(folder.id).then(async () => {
-          await FirebaseSyncService.deleteFolder(folder.id);
-          // Delete folder projects from Firebase as well
-          const folderProjects = projects.filter(p => p.folderId === folder.id);
-          for (const p of folderProjects) {
-            await FirebaseSyncService.deleteProject(p.id);
-          }
-          loadFolders();
-          onRefresh();
-        });
-      }
-      return;
-    }
-
-    Alert.alert(
+    showAlert(
       'Xóa thư mục',
       `Bạn chắc chắn muốn xóa thư mục "${folder.name}"? Hành động này sẽ xóa tất cả các bài học bên trong thư mục này.`,
       [

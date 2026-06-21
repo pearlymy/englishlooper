@@ -18,6 +18,7 @@ import { WhisperService } from '../services/whisperService';
 import { AITranslationService } from '../services/aiTranslationService';
 import { DBService } from '../services/dbService';
 import { AutocutService as AutocutServiceType } from '../services/autocutService';
+import { showAlert } from '../utils/alert';
 
 const IS_WEB = Platform.OS === 'web';
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -205,7 +206,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
   // ─── Word-level Split ───
   const startWordSplit = (seg: Segment) => {
     if (!seg.transcript || seg.transcript.trim().split(/\s+/).length < 2) {
-      Alert.alert('Không thể tách', 'Câu cần có ít nhất 2 từ để tách.');
+      showAlert('Không thể tách', 'Câu cần có ít nhất 2 từ để tách.');
       return;
     }
     setSplittingSegId(seg.id);
@@ -227,7 +228,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
 
     // Minimum gap check
     if (splitTimeMs - seg.startTimeMs < 300 || seg.endTimeMs - splitTimeMs < 300) {
-      Alert.alert('Không thể tách', 'Phần tách quá ngắn (< 300ms).');
+      showAlert('Không thể tách', 'Phần tách quá ngắn (< 300ms).');
       return;
     }
 
@@ -240,10 +241,10 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
   // ─── Delete segment ───
   const handleDeleteSegment = (segId: string) => {
     if (segments.length <= 1) {
-      Alert.alert('Không thể xóa', 'Phải giữ ít nhất 1 câu.');
+      showAlert('Không thể xóa', 'Phải giữ ít nhất 1 câu.');
       return;
     }
-    Alert.alert('Xóa câu?', 'Bạn có chắc muốn xóa câu này? Hành động này không thể hoàn tác.', [
+    showAlert('Xóa câu?', 'Bạn có chắc muốn xóa câu này? Hành động này không thể hoàn tác.', [
       { text: 'Hủy', style: 'cancel' },
       {
         text: 'Xóa', style: 'destructive', onPress: () => {
@@ -272,7 +273,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
       if (apiKey) setResolvedApiKey(apiKey);
     }
     if (!apiKey) {
-      Alert.alert('Thiếu API Key', 'Cần API Key để dịch và phiên âm. Vui lòng vào Import và lưu API Key trước.');
+      showAlert('Thiếu API Key', 'Cần API Key để dịch và phiên âm. Vui lòng vào Import và lưu API Key trước.');
       return;
     }
 
@@ -281,7 +282,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
       .filter(s => s.text.length > 0);
 
     if (sentencesToTranslate.length === 0) {
-      Alert.alert('Không có gì để dịch', 'Không có câu nào có transcript.');
+      showAlert('Không có gì để dịch', 'Không có câu nào có transcript.');
       return;
     }
 
@@ -307,7 +308,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
       );
     } catch (err) {
       console.warn('[ReviewScreen] AI translate failed:', err);
-      Alert.alert('Lỗi', 'Dịch AI thất bại. Vui lòng thử lại.');
+      showAlert('Lỗi', 'Dịch AI thất bại. Vui lòng thử lại.');
     } finally {
       setIsTranslating(false);
     }
@@ -330,7 +331,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
       if (apiKey) setResolvedApiKey(apiKey);
     }
     if (!apiKey) {
-      Alert.alert('Thiếu API Key', 'Cần API Key để AI cắt câu lại.');
+      showAlert('Thiếu API Key', 'Cần API Key để AI cắt câu lại.');
       return;
     }
 
@@ -388,10 +389,10 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
 
       setSegments(finalSegments);
       setRetranscribeProgress('');
-      Alert.alert('✅ Thành công', `AI đã cắt lại ${finalSegments.length} câu với word-level timestamps mới.`);
+      showAlert('✅ Thành công', `AI đã cắt lại ${finalSegments.length} câu với word-level timestamps mới.`);
     } catch (err) {
       console.error('[ReviewScreen] Retranscribe failed:', err);
-      Alert.alert('Lỗi', 'AI cắt câu lại thất bại. Vui lòng thử lại.');
+      showAlert('Lỗi', 'AI cắt câu lại thất bại. Vui lòng thử lại.');
     } finally {
       setIsRetranscribing(false);
       setRetranscribeProgress('');
@@ -403,7 +404,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
     // 1. Gộp toàn bộ transcript
     const fullText = segments.map(s => s.transcript || '').join(' ').trim();
     if (!fullText) {
-      Alert.alert('Không có dữ liệu', 'Không có transcript để ngắt lại.');
+      showAlert('Không có dữ liệu', 'Không có transcript để ngắt lại.');
       return;
     }
 
@@ -412,7 +413,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
     const grouped = AutocutService.groupSentences2by2(sentences);
 
     if (grouped.length === 0) {
-      Alert.alert('Không thể ngắt', 'Không tìm thấy dấu câu để tách.');
+      showAlert('Không thể ngắt', 'Không tìm thấy dấu câu để tách.');
       return;
     }
 
@@ -450,19 +451,14 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
   };
 
   const handleResplitAll = () => {
-    if (IS_WEB) {
-      const ok = (window as any).confirm('Gộp toàn bộ transcript và tách lại theo dấu câu (. ? !). Thời gian sẽ được chia lại theo tỉ lệ số từ.\n\nBạn muốn tiếp tục?');
-      if (ok) doResplitAll();
-    } else {
-      Alert.alert(
-        'Ngắt lại tất cả?',
-        'Gộp toàn bộ transcript và tách lại theo dấu câu (. ? !). Thời gian sẽ được chia lại theo tỉ lệ số từ.',
-        [
-          { text: 'Hủy', style: 'cancel' },
-          { text: 'Ngắt lại', style: 'destructive', onPress: doResplitAll }
-        ]
-      );
-    }
+    showAlert(
+      'Ngắt lại tất cả?',
+      'Gộp toàn bộ transcript và tách lại theo dấu câu (. ? !). Thời gian sẽ được chia lại theo tỉ lệ số từ.',
+      [
+        { text: 'Hủy', style: 'cancel' },
+        { text: 'Ngắt lại', style: 'destructive', onPress: doResplitAll }
+      ]
+    );
   };
 
   // ─── Computed ───

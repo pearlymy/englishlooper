@@ -21,6 +21,7 @@ import { WhisperService } from '../services/whisperService';
 import { AITranslationService } from '../services/aiTranslationService';
 import { DBService } from '../services/dbService';
 import { FirebaseSyncService } from '../services/firebaseSyncService';
+import { showAlert } from '../utils/alert';
 
 export interface ReviewPendingData {
   title: string;
@@ -95,7 +96,7 @@ export default function ImportScreen({ preselectedFolderId, onProjectCreated, on
   const handleSaveApiKey = async () => {
     const key = apiKeyInput.trim();
     if (!key) {
-      Alert.alert('Lỗi', 'Vui lòng nhập API key');
+      showAlert('Lỗi', 'Vui lòng nhập API key');
       return;
     }
     setLoadingText('Đang kiểm tra API key...');
@@ -108,10 +109,10 @@ export default function ImportScreen({ preselectedFolderId, onProjectCreated, on
       setApiKey(key);
       setApiKeyValid(true);
       setUseAI(true);
-      Alert.alert('✅ Thành công', 'API key hợp lệ! AI cắt câu đã sẵn sàng.');
+      showAlert('✅ Thành công', 'API key hợp lệ! AI cắt câu đã sẵn sàng.');
     } else {
       setApiKeyValid(false);
-      Alert.alert('❌ Không hợp lệ', 'API key sai. Vui lòng kiểm tra lại.');
+      showAlert('❌ Không hợp lệ', 'API key sai. Vui lòng kiểm tra lại.');
     }
   };
 
@@ -148,7 +149,7 @@ export default function ImportScreen({ preselectedFolderId, onProjectCreated, on
         setLoadingText('');
       }
     } catch (error) {
-      Alert.alert('Lỗi', 'Không thể chọn tệp âm thanh.');
+      showAlert('Lỗi', 'Không thể chọn tệp âm thanh.');
     }
   };
 
@@ -163,7 +164,7 @@ export default function ImportScreen({ preselectedFolderId, onProjectCreated, on
   // Tạo và xử lý cắt câu tự động (sử dụng AudioAnalyzer thật)
   const handleProcess = async () => {
     if (!audioFile) {
-      Alert.alert('Thiếu thông tin', 'Vui lòng chọn tệp MP3 trước.');
+      showAlert('Thiếu thông tin', 'Vui lòng chọn tệp MP3 trước.');
       return;
     }
 
@@ -233,7 +234,7 @@ export default function ImportScreen({ preselectedFolderId, onProjectCreated, on
     } catch (err) {
       setIsLoading(false);
       setLoadingText('');
-      Alert.alert('Thất bại', 'Quá trình xử lý gặp lỗi. Vui lòng thử lại.');
+      showAlert('Thất bại', 'Quá trình xử lý gặp lỗi. Vui lòng thử lại.');
     }
   };
 
