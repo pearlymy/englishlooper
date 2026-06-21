@@ -16,6 +16,8 @@ import { AutocutService } from '../services/autocutService';
 import { AudioService, PlaybackCallbackData } from '../services/audioService';
 import { WhisperService } from '../services/whisperService';
 import { AITranslationService } from '../services/aiTranslationService';
+import { DBService } from '../services/dbService';
+import { AutocutService as AutocutServiceType } from '../services/autocutService';
 
 const IS_WEB = Platform.OS === 'web';
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -68,6 +70,8 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
   const [playingPosition, setPlayingPosition] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [isRetranscribing, setIsRetranscribing] = useState(false);
+  const [retranscribeProgress, setRetranscribeProgress] = useState('');
 
   // Word-level split state
   const [splittingSegId, setSplittingSegId] = useState<string | null>(null);
@@ -94,14 +98,39 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
     const service = new AudioService();
     audioRef.current = service;
 
-    service.loadSound(
-      pendingData.audioUri,
-      segments,
-      (data: PlaybackCallbackData) => {
-        setPlayingPosition(data.positionMs);
-        setIsPlaying(data.isPlaying);
+    // Resolve audio URI — handle db: protocol for saved projects
+    const resolveAndLoad = async () => {
+      let resolvedUri = pendingData.audioUri;
+
+      // If URI starts with 'db:', resolve from IndexedDB
+      if (resolvedUri.startsWith('db:')) {
+        const projectId = resolvedUri.replace('db:', '');
+        try {
+          const blob = await DBService.getAudio(projectId);
+          if (blob) {
+            resolvedUri = URL.createObjectURL(blob);
+            console.log('[ReviewScreen] Resolved db: URI to blob URL for playback');
+          } else {
+            console.warn('[ReviewScreen] No audio blob found in IndexedDB for', projectId);
+            return;
+          }
+        } catch (err) {
+          console.warn('[ReviewScreen] Failed to resolve db: URI:', err);
+          return;
+        }
       }
-    ).catch(err => console.warn('[ReviewScreen] Audio load failed:', err));
+
+      await service.loadSound(
+        resolvedUri,
+        segments,
+        (data: PlaybackCallbackData) => {
+          setPlayingPosition(data.positionMs);
+          setIsPlaying(data.isPlaying);
+        }
+      );
+    };
+
+    resolveAndLoad().catch(err => console.warn('[ReviewScreen] Audio load failed:', err));
 
     return () => {
       service.unload().catch(() => {});
@@ -286,6 +315,77 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
     // Small delay to ensure audio is released
     await new Promise(r => setTimeout(r, 200));
     onConfirm(segments);
+  };
+
+  // ─── AI Re-transcribe (dùng pipeline mới với word-level timestamps) ───
+  const handleRetranscribe = async () => {
+    if (!resolvedApiKey) {
+      Alert.alert('Thiếu API Key', 'Cần API Key để AI cắt câu lại.');
+      return;
+    }
+
+    setIsRetranscribing(true);
+    setRetranscribeProgress('Đang chuẩn bị audio...');
+    await handleStopAll();
+
+    try {
+      // Resolve audio URI for transcription
+      let audioUri = pendingData.audioUri;
+      if (audioUri.startsWith('db:')) {
+        const projectId = audioUri.replace('db:', '');
+        const blob = await DBService.getAudio(projectId);
+        if (blob) {
+          audioUri = URL.createObjectURL(blob);
+        } else {
+          throw new Error('Không tìm thấy audio trong IndexedDB');
+        }
+      }
+
+      // Re-run AI transcription with the original transcript to keep 2-by-2 grouping and text matching
+      const originalTranscript = pendingData.transcriptText || segments.map(s => s.transcript || '').join(' ').trim();
+      const { segments: newSegments, durationMs } = await AutocutService.analyzeAndSplit(
+        audioUri,
+        originalTranscript || undefined,
+        (msg) => setRetranscribeProgress(msg),
+        true, // useAI
+        resolvedApiKey
+      );
+
+      // Optionally translate
+      let finalSegments = newSegments;
+      try {
+        setRetranscribeProgress('Đang dịch & phiên âm...');
+        const sentencesToTranslate = newSegments
+          .map(seg => ({ index: seg.index, text: seg.transcript || '' }))
+          .filter(s => s.text.length > 0);
+
+        if (sentencesToTranslate.length > 0) {
+          const translations = await AITranslationService.translateAndPhoneticsBatch(
+            sentencesToTranslate,
+            resolvedApiKey
+          );
+          finalSegments = newSegments.map(seg => {
+            const match = translations.find(t => t.index === seg.index);
+            if (match) {
+              return { ...seg, ipa: match.ipa || undefined, translation: match.vietnamese || undefined };
+            }
+            return seg;
+          });
+        }
+      } catch (e) {
+        console.warn('[ReviewScreen] AI translation failed during retranscribe:', e);
+      }
+
+      setSegments(finalSegments);
+      setRetranscribeProgress('');
+      Alert.alert('✅ Thành công', `AI đã cắt lại ${finalSegments.length} câu với word-level timestamps mới.`);
+    } catch (err) {
+      console.error('[ReviewScreen] Retranscribe failed:', err);
+      Alert.alert('Lỗi', 'AI cắt câu lại thất bại. Vui lòng thử lại.');
+    } finally {
+      setIsRetranscribing(false);
+      setRetranscribeProgress('');
+    }
   };
 
   // ── Ngắt lại tất cả theo dấu câu ──
@@ -559,6 +659,26 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
               <Text style={{ color: '#fbbf24', fontSize: 14 }}>🔄</Text>
             )}
           </TouchableOpacity>
+          {/* 🤖 AI Re-transcribe */}
+          <TouchableOpacity
+            style={[styles.headerActionBtn, { borderColor: 'rgba(16,185,129,0.3)' }, isRetranscribing && { opacity: 0.5 }]}
+            onPress={handleRetranscribe}
+            activeOpacity={0.7}
+            disabled={isRetranscribing}
+          >
+            {isRetranscribing ? (
+              <ActivityIndicator size="small" color="#10b981" />
+            ) : IS_WEB ? (
+              <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                <path d="M12 8V4H8" />
+                <rect width="16" height="12" x="4" y="8" rx="2" />
+                <path d="M2 14h2" /><path d="M20 14h2" />
+                <path d="M15 13v2" /><path d="M9 13v2" />
+              </svg>
+            ) : (
+              <Text style={{ color: '#10b981', fontSize: 14 }}>🤖</Text>
+            )}
+          </TouchableOpacity>
           {/* Dịch & Phiên âm AI */}
           <TouchableOpacity
             style={[styles.headerActionBtn, { borderColor: 'rgba(167,139,250,0.3)' }, isTranslating && { opacity: 0.7 }]}
@@ -656,6 +776,28 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
           const realIndex = segments.findIndex(s => s.id === seg.id);
           return renderSegmentCard(seg, realIndex);
         })}
+
+        {/* Loading overlay for retranscribe */}
+        {isRetranscribing && (
+          <View style={{
+            position: 'absolute' as any,
+            top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(8,8,13,0.85)',
+            justifyContent: 'center',
+            alignItems: 'center',
+            zIndex: 100,
+            borderRadius: 16,
+            padding: 40,
+          }}>
+            <ActivityIndicator size="large" color="#10b981" />
+            <Text style={{ color: '#10b981', fontSize: 15, fontWeight: '700', marginTop: 16, textAlign: 'center' }}>
+              🤖 AI đang cắt câu lại...
+            </Text>
+            <Text style={{ color: '#5a5a8a', fontSize: 13, marginTop: 8, textAlign: 'center' }}>
+              {retranscribeProgress || 'Đang chuẩn bị...'}
+            </Text>
+          </View>
+        )}
 
 
       </ScrollView>

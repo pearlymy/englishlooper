@@ -18,6 +18,13 @@ const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const WHISPER_MODEL = 'whisper-large-v3-turbo';
 const MAX_UPLOAD_BYTES = 24 * 1024 * 1024; // 24MB safety margin (Groq limit: 25MB)
 const CHUNK_DURATION_SEC = 600; // 10 minutes per chunk for very long files
+const CHUNK_OVERLAP_SEC = 30;  // 30s overlap between chunks to avoid cutting sentences
+
+export interface WhisperWord {
+  word: string;
+  start: number;  // seconds
+  end: number;    // seconds
+}
 
 export interface WhisperSegment {
   start: number;  // seconds
@@ -28,6 +35,7 @@ export interface WhisperSegment {
 export interface WhisperResult {
   text: string;
   segments: WhisperSegment[];
+  words: WhisperWord[];  // word-level timestamps for precise alignment
   language: string;
   duration: number;
 }
@@ -103,12 +111,13 @@ export class WhisperService {
       onProgress?.(`Đã nén xuống ${(blob.size / (1024 * 1024)).toFixed(1)}MB`);
     }
 
-    // 2. Tạo FormData
+    // 2. Tạo FormData — request BOTH segment + word timestamps
     const formData = new FormData();
     formData.append('file', blob, fileName);
     formData.append('model', WHISPER_MODEL);
     formData.append('response_format', 'verbose_json');
     formData.append('timestamp_granularities[]', 'segment');
+    formData.append('timestamp_granularities[]', 'word');
 
     if (language) {
       formData.append('language', language);
@@ -151,23 +160,31 @@ export class WhisperService {
       duration: data.duration,
     });
 
-    // 4. Xử lý segments — dùng TRỰC TIẾP raw Whisper (mỗi segment = 1 câu)
+    // 4. Xử lý segments — dùng TRỰC TIẾP raw Whisper text (không sửa dấu câu)
     const segments: WhisperSegment[] = (data.segments || []).map((seg: any) => ({
       start: seg.start,
       end: seg.end,
-      text: this.fixMissingPunctuation((seg.text || '').trim()),
+      text: (seg.text || '').trim(),
     }));
 
-    console.log(`[Whisper] ${segments.length} sentences detected`);
+    // 5. Extract word-level timestamps (chính xác hơn character ratio)
+    const words: WhisperWord[] = (data.words || []).map((w: any) => ({
+      word: (w.word || '').trim(),
+      start: w.start,
+      end: w.end,
+    })).filter((w: WhisperWord) => w.word.length > 0);
+
+    console.log(`[Whisper] ${segments.length} sentences, ${words.length} words detected`);
     segments.slice(0, 5).forEach((s, i) =>
       console.log(`  #${i}: ${s.start.toFixed(2)}s → ${s.end.toFixed(2)}s "${s.text.substring(0, 50)}"`)
     );
 
-    onProgress?.(`AI phát hiện ${segments.length} câu`);
+    onProgress?.(`AI phát hiện ${segments.length} câu, ${words.length} từ`);
 
     return {
       text: data.text || '',
       segments,
+      words,
       language: data.language || 'unknown',
       duration: data.duration || 0,
     };
@@ -231,16 +248,22 @@ export class WhisperService {
 
     const TARGET_SAMPLE_RATE = 16000;
     const totalDuration = audioBuffer.duration;
-    const numChunks = Math.ceil(totalDuration / CHUNK_DURATION_SEC);
+    // Use stride = CHUNK_DURATION - OVERLAP to create overlapping chunks
+    const stride = CHUNK_DURATION_SEC - CHUNK_OVERLAP_SEC;
+    const numChunks = Math.ceil(totalDuration / stride);
 
     const allSegments: WhisperSegment[] = [];
+    const allWords: WhisperWord[] = [];
     let fullText = '';
     let detectedLanguage = 'unknown';
 
     for (let i = 0; i < numChunks; i++) {
-      const chunkStart = i * CHUNK_DURATION_SEC;
-      const chunkEnd = Math.min((i + 1) * CHUNK_DURATION_SEC, totalDuration);
+      const chunkStart = i * stride;
+      const chunkEnd = Math.min(chunkStart + CHUNK_DURATION_SEC, totalDuration);
       const chunkDuration = chunkEnd - chunkStart;
+
+      // Skip if chunk is too short (< 1s)
+      if (chunkDuration < 1) continue;
 
       const startMin = Math.floor(chunkStart / 60);
       const endMin = Math.floor(chunkEnd / 60);
@@ -257,12 +280,13 @@ export class WhisperService {
       const renderedBuffer = await offlineContext.startRendering();
       const wavBlob = this.audioBufferToWav(renderedBuffer);
 
-      // Send chunk to Groq API
+      // Send chunk to Groq API — request both segment + word timestamps
       const formData = new FormData();
       formData.append('file', wavBlob, `chunk_${i}.wav`);
       formData.append('model', WHISPER_MODEL);
       formData.append('response_format', 'verbose_json');
       formData.append('timestamp_granularities[]', 'segment');
+      formData.append('timestamp_granularities[]', 'word');
       if (language) formData.append('language', language);
 
       const response = await fetch(GROQ_ENDPOINT, {
@@ -282,26 +306,72 @@ export class WhisperService {
       const data = await response.json();
 
       if (i === 0) detectedLanguage = data.language || 'unknown';
-      fullText += (fullText ? ' ' : '') + (data.text || '');
 
-      // Adjust timestamps: add chunkStart offset
+      // Determine the overlap zone: segments from previous chunk that fall in overlap region
+      // Only keep segments whose midpoint is NOT in the overlap zone of the previous chunk
+      const overlapBoundary = i > 0 ? chunkStart + CHUNK_OVERLAP_SEC : 0;
+
+      // Adjust timestamps: add chunkStart offset, dedup overlap
       for (const seg of (data.segments || [])) {
+        const globalStart = seg.start + chunkStart;
+        const globalEnd = seg.end + chunkStart;
+        const midpoint = (globalStart + globalEnd) / 2;
+
+        // For chunks after the first: skip segments whose midpoint falls
+        // within the overlap region (already covered by previous chunk)
+        if (i > 0 && midpoint < overlapBoundary) {
+          continue;
+        }
+
         allSegments.push({
-          start: seg.start + chunkStart,
-          end: seg.end + chunkStart,
-          text: this.fixMissingPunctuation((seg.text || '').trim()),
+          start: globalStart,
+          end: globalEnd,
+          text: (seg.text || '').trim(),
         });
+      }
+
+      // Process word-level timestamps with same dedup
+      for (const w of (data.words || [])) {
+        const globalStart = w.start + chunkStart;
+        const globalEnd = w.end + chunkStart;
+        const midpoint = (globalStart + globalEnd) / 2;
+
+        if (i > 0 && midpoint < overlapBoundary) {
+          continue;
+        }
+
+        allWords.push({
+          word: (w.word || '').trim(),
+          start: globalStart,
+          end: globalEnd,
+        });
+      }
+
+      // Only add text from non-overlapping parts
+      if (i === 0) {
+        fullText = data.text || '';
+      } else {
+        // Approximate: use segments we kept to reconstruct text for this chunk
+        const keptText = (data.segments || [])
+          .filter((seg: any) => {
+            const mid = (seg.start + seg.end) / 2 + chunkStart;
+            return mid >= overlapBoundary;
+          })
+          .map((seg: any) => (seg.text || '').trim())
+          .join(' ');
+        fullText += ' ' + keptText;
       }
     }
 
     await audioContext.close();
 
-    console.log(`[Whisper] Chunked transcription complete: ${allSegments.length} segments from ${numChunks} chunks`);
-    onProgress?.(`AI phát hiện ${allSegments.length} câu (${numChunks} phần)`);
+    console.log(`[Whisper] Chunked transcription complete: ${allSegments.length} segments, ${allWords.length} words from ${numChunks} overlapping chunks`);
+    onProgress?.(`AI phát hiện ${allSegments.length} câu, ${allWords.length} từ (${numChunks} phần)`);
 
     return {
-      text: fullText,
+      text: fullText.trim(),
       segments: allSegments,
+      words: allWords,
       language: detectedLanguage,
       duration: totalDuration,
     };
@@ -375,7 +445,6 @@ export class WhisperService {
 
     const SENTENCES_PER_SEGMENT = 1;  // Mỗi segment = 1 câu
     const MAX_SENTENCE_SEC = 15;      // Tối đa 15s
-    const SENTENCE_ENDERS = /[.!?。？！…]+\s*$/;  // Dấu kết thúc câu
 
     // Đếm số câu thực sự trong text (dựa trên dấu câu)
     const countSentences = (text: string): number => {
@@ -393,12 +462,12 @@ export class WhisperService {
       const seg = segments[i];
       const wouldBeDuration = seg.end - accStart;
 
-      // Kết thúc segment khi đủ 2 câu HOẶC quá dài
+      // Kết thúc segment khi đủ câu HOẶC quá dài
       if (sentenceCount >= SENTENCES_PER_SEGMENT || wouldBeDuration > MAX_SENTENCE_SEC) {
         result.push({
           start: accStart,
           end: accEnd,
-          text: this.fixMissingPunctuation(accText.trim()),
+          text: accText.trim(),
         });
         accStart = seg.start;
         accEnd = seg.end;
@@ -412,7 +481,7 @@ export class WhisperService {
     }
 
     // Đẩy câu cuối
-    result.push({ start: accStart, end: accEnd, text: this.fixMissingPunctuation(accText.trim()) });
+    result.push({ start: accStart, end: accEnd, text: accText.trim() });
 
     // Gộp câu cuối nếu quá ngắn (< 2s)
     if (result.length > 1) {
@@ -420,7 +489,7 @@ export class WhisperService {
       if (last.end - last.start < 2) {
         const prev = result[result.length - 2];
         prev.end = last.end;
-        prev.text = this.fixMissingPunctuation((prev.text + ' ' + last.text).trim());
+        prev.text = (prev.text + ' ' + last.text).trim();
         result.pop();
       }
     }
@@ -430,15 +499,28 @@ export class WhisperService {
   }
 
   /**
-   * Fix missing punctuation: chèn dấu "." khi phát hiện chữ viết hoa sau chữ thường
-   * mà không có dấu câu phân cách.
-   * Ví dụ: "startups She is" → "startups. She is"
+   * Fix missing punctuation — SAFE version.
+   * Chỉ chèn dấu "." khi chắc chắn là ranh giới câu:
+   * - Sau từ kết thúc dài ≥ 4 ký tự (tránh abbreviations/initials)
+   * - Trước từ bắt đầu dài ≥ 2 ký tự viết hoa (tránh "I")
+   * - Loại trừ proper nouns phổ biến (New York, Mr Smith, etc.)
+   * 
+   * NOTE: Hàm này giờ chỉ được dùng cho display, KHÔNG dùng cho alignment.
    */
-  private static fixMissingPunctuation(text: string): string {
+  static fixMissingPunctuation(text: string): string {
     if (!text) return text;
-    // Match: lowercase letter + space + uppercase letter (new sentence without punctuation)
-    // Exclude common patterns like "I" standalone, abbreviations
-    return text.replace(/([a-z]) ([A-Z])/g, (match, before, after) => {
+
+    // Common words that start with uppercase but are NOT sentence starts
+    const PROPER_PREFIXES = new Set([
+      'I', 'Mr', 'Mrs', 'Ms', 'Dr', 'Prof', 'Sr', 'Jr', 'St',
+      'New', 'Old', 'North', 'South', 'East', 'West',
+      'United', 'Great', 'San', 'Los', 'Las', 'El', 'La',
+      'Mac', 'Mc', 'Van', 'Von', 'De', 'Du', 'Le',
+    ]);
+
+    return text.replace(/([a-z]{4,})\s+([A-Z][a-z]{2,})/g, (match, before, after) => {
+      // Don't insert period if the capitalized word is a known proper noun prefix
+      if (PROPER_PREFIXES.has(after)) return match;
       return `${before}. ${after}`;
     });
   }

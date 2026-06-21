@@ -213,6 +213,8 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
   const [showTimelineModal, setShowTimelineModal] = useState(false);
   const [showTools, setShowTools] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [isRetranscribing, setIsRetranscribing] = useState(false);
+  const [retranscribeProgress, setRetranscribeProgress] = useState('');
 
   // Load persisted settings from localStorage on mount
   const settingsLoadedRef = useRef(false);
@@ -481,6 +483,90 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
       Alert.alert('Lỗi', `Không thể nạp tệp âm thanh đã chọn.\n${err.message || err}`);
     } finally {
       setIsReloadingAudio(false);
+    }
+  };
+
+  // ─── AI Re-transcribe (word-level timestamps) ───
+  const handleRetranscribe = async () => {
+    setIsRetranscribing(true);
+    setRetranscribeProgress('Đang chuẩn bị audio...');
+    setShowSettings(false);
+
+    try {
+      // Pause playback
+      if (audioServiceRef.current && isPlaying) {
+        await audioServiceRef.current.pause();
+      }
+
+      // Resolve API key
+      let apiKey = await WhisperService.getApiKey();
+      if (!apiKey) {
+        Alert.alert('Thiếu API Key', 'Cần API Key để AI cắt câu lại. Vào Settings để thêm.');
+        setIsRetranscribing(false);
+        return;
+      }
+
+      // Resolve audio URI
+      let audioUri = project.audioUri;
+      if (audioUri.startsWith('db:')) {
+        const projectId = audioUri.replace('db:', '');
+        const blob = await DBService.getAudio(projectId);
+        if (blob) {
+          audioUri = URL.createObjectURL(blob);
+        } else {
+          throw new Error('Không tìm thấy audio trong IndexedDB');
+        }
+      }
+
+      // Re-run AI transcription with the original transcript to keep 2-by-2 grouping and text matching
+      const originalTranscript = project.transcriptText || project.segments.map(s => s.transcript || '').join(' ').trim();
+      const { segments: newSegments } = await AutocutService.analyzeAndSplit(
+        audioUri,
+        originalTranscript || undefined,
+        (msg) => setRetranscribeProgress(msg),
+        true,
+        apiKey
+      );
+
+      // Translate
+      let finalSegments = newSegments;
+      try {
+        setRetranscribeProgress('Đang dịch & phiên âm...');
+        const sentencesToTranslate = newSegments
+          .map(seg => ({ index: seg.index, text: seg.transcript || '' }))
+          .filter(s => s.text.length > 0);
+        if (sentencesToTranslate.length > 0) {
+          const translations = await AITranslationService.translateAndPhoneticsBatch(sentencesToTranslate, apiKey);
+          finalSegments = newSegments.map(seg => {
+            const match = translations.find(t => t.index === seg.index);
+            return match ? { ...seg, ipa: match.ipa || undefined, translation: match.vietnamese || undefined } : seg;
+          });
+        }
+      } catch (e) {
+        console.warn('[PlayerScreen] AI translation failed during retranscribe:', e);
+      }
+
+      // Update state + save
+      setSegments(finalSegments);
+      setActiveSegmentId(finalSegments[0]?.id || null);
+
+      const updatedProject = { ...project, segments: finalSegments };
+      setProject(updatedProject);
+      await StorageService.saveProject(updatedProject);
+      FirebaseSyncService.uploadProject(updatedProject).catch(() => {});
+
+      // Reload audio with new segments
+      if (audioServiceRef.current) {
+        audioServiceRef.current.updateSegments(finalSegments);
+      }
+
+      Alert.alert('✅ Thành công', `AI đã cắt lại ${finalSegments.length} câu với timestamps mới.`);
+    } catch (err: any) {
+      console.error('[PlayerScreen] Retranscribe failed:', err);
+      Alert.alert('Lỗi', `AI cắt câu lại thất bại: ${err.message || 'Vui lòng thử lại.'}`);
+    } finally {
+      setIsRetranscribing(false);
+      setRetranscribeProgress('');
     }
   };
 
@@ -1780,6 +1866,41 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
               </Text>
             </TouchableOpacity>
 
+            {/* ── 🤖 AI Re-transcribe ── */}
+            <TouchableOpacity
+              style={{
+                width: '100%',
+                paddingVertical: 14,
+                borderRadius: 14,
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexDirection: 'row',
+                gap: 8,
+                backgroundColor: 'rgba(245,158,11,0.1)',
+                borderWidth: 1,
+                borderColor: 'rgba(245,158,11,0.25)',
+                marginBottom: 10,
+                ...(IS_WEB ? { cursor: 'pointer' } as any : {}),
+              }}
+              onPress={handleRetranscribe}
+              activeOpacity={0.7}
+              disabled={isRetranscribing}
+            >
+              {IS_WEB ? (
+                <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M12 8V4H8" />
+                  <rect width="16" height="12" x="4" y="8" rx="2" />
+                  <path d="M2 14h2" /><path d="M20 14h2" />
+                  <path d="M15 13v2" /><path d="M9 13v2" />
+                </svg>
+              ) : (
+                <Text style={{ color: '#f59e0b', fontSize: 16 }}>🤖</Text>
+              )}
+              <Text style={{ color: '#f59e0b', fontSize: 14, fontWeight: '700' }}>
+                🤖 AI cắt câu lại (fix lệch tiếng)
+              </Text>
+            </TouchableOpacity>
+
             {/* ── Open ReviewScreen for advanced editing ── */}
             {onOpenReview && (
               <TouchableOpacity
@@ -2002,6 +2123,28 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
         </View>
       </Modal>
 
+      {/* ── RETRANSCRIBE LOADING OVERLAY ── */}
+      {isRetranscribing && (
+        <View style={{
+          position: 'absolute' as any,
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(8,8,13,0.92)',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 9999,
+        }}>
+          <ActivityIndicator size="large" color="#f59e0b" />
+          <Text style={{ color: '#f59e0b', fontSize: 18, fontWeight: '800', marginTop: 20, textAlign: 'center' }}>
+            🤖 AI đang cắt câu lại...
+          </Text>
+          <Text style={{ color: '#8a8aaa', fontSize: 14, marginTop: 10, textAlign: 'center', maxWidth: 300 }}>
+            {retranscribeProgress || 'Đang chuẩn bị...'}
+          </Text>
+          <Text style={{ color: '#4a4a6a', fontSize: 12, marginTop: 20, textAlign: 'center', maxWidth: 280 }}>
+            Quá trình này mất 30s - 2 phút tùy độ dài audio
+          </Text>
+        </View>
+      )}
 
     </View>
   );

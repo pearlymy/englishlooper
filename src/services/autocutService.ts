@@ -1,6 +1,6 @@
 import { Segment } from '../types';
 import { AudioAnalyzer, AnalysisResult } from './audioAnalyzer';
-import { WhisperService } from './whisperService';
+import { WhisperService, WhisperWord } from './whisperService';
 
 export class AutocutService {
   /**
@@ -64,19 +64,22 @@ export class AutocutService {
 
     const durationMs = Math.round(whisperResult.duration * 1000);
     const whisperSegs = whisperResult.segments;
+    const whisperWords = whisperResult.words || [];
 
-    if (transcriptText?.trim()) {
+    const activeTranscript = transcriptText?.trim() || whisperResult.text;
+
+    if (activeTranscript?.trim()) {
       onProgress?.('🤖 Đang khớp transcript với âm thanh...');
-      const sentences = this.smartSplitTranscript(transcriptText);
+      const sentences = this.smartSplitTranscript(activeTranscript);
       const userSentences = this.groupSentences2by2(sentences);
       if (userSentences.length > 0) {
-        const segments = this.alignSentencesWithWhisper(userSentences, whisperSegs, durationMs);
+        const segments = this.alignSentencesWithWhisper(userSentences, whisperSegs, durationMs, whisperWords);
         onProgress?.(`✅ Khớp thành công ${segments.length} đoạn theo transcript (2 câu/đoạn)`);
         return { segments, durationMs, method: 'whisper-ai-aligned' };
       }
     }
 
-    // Gộp raw Whisper segments 2-by-2
+    // Gộp raw Whisper segments 2-by-2 (2 câu 1 cụm)
     const groupedWhisperSegs: typeof whisperSegs = [];
     for (let i = 0; i < whisperSegs.length; i += 2) {
       const seg1 = whisperSegs[i];
@@ -92,24 +95,27 @@ export class AutocutService {
       }
     }
 
-    // PRE_PAD: bắt đầu sớm hơn 300ms để không cắt mất đầu câu
-    // POST_PAD: kết thúc muộn hơn 200ms để nghe hết cuối câu
-    const PRE_PAD_MS = 300;
-    const POST_PAD_MS = 200;
-
-    // Tạo segments với padding
+    // Dynamic padding: calculate based on actual gaps between segments
     const segments: Segment[] = groupedWhisperSegs.map((seg, i) => {
-      // Start: lùi 300ms nhưng không sớm hơn end của segment trước (tránh overlap)
       const rawStart = Math.round(seg.start * 1000);
-      const prevEnd = i > 0 ? Math.round(groupedWhisperSegs[i - 1].end * 1000) : 0;
-      const startMs = Math.max(prevEnd, rawStart - PRE_PAD_MS);
-
-      // End: thêm 200ms nhưng không muộn hơn start của segment sau (tránh overlap)
       const rawEnd = Math.round(seg.end * 1000);
+
+      // Calculate dynamic padding based on actual gap to neighbors
+      const prevEnd = i > 0 ? Math.round(groupedWhisperSegs[i - 1].end * 1000) : 0;
       const nextStart = i < groupedWhisperSegs.length - 1
         ? Math.round(groupedWhisperSegs[i + 1].start * 1000)
         : durationMs;
-      const endMs = Math.min(nextStart, rawEnd + POST_PAD_MS);
+
+      const gapBefore = rawStart - prevEnd;
+      const gapAfter = nextStart - rawEnd;
+
+      // Pre-pad: use up to 40% of gap before, capped at 300ms
+      const prePad = Math.min(300, Math.round(gapBefore * 0.4));
+      // Post-pad: use up to 40% of gap after, capped at 200ms
+      const postPad = Math.min(200, Math.round(gapAfter * 0.4));
+
+      const startMs = Math.max(prevEnd, rawStart - prePad);
+      const endMs = Math.min(nextStart, rawEnd + postPad);
 
       return {
         id: `seg_ai_${i + 1}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
@@ -123,7 +129,7 @@ export class AutocutService {
     });
 
     // Debug: log first 5 segments
-    console.log('[WhisperSplit] First 5 segments (with padding):');
+    console.log('[WhisperSplit] First 5 segments (2-by-2 grouping + dynamic padding):');
     segments.slice(0, 5).forEach(s =>
       console.log(`  #${s.index}: ${s.startTimeMs}ms → ${s.endTimeMs}ms (${s.durationMs}ms) "${(s.transcript || '').substring(0, 60)}..."`)
     );
@@ -134,43 +140,61 @@ export class AutocutService {
   }
 
   /**
-   * Khớp các câu trong user transcript với raw Whisper segments bằng Needleman-Wunsch
+   * Khớp các câu trong user transcript với Whisper timestamps.
+   * Sử dụng WORD-LEVEL timestamps từ Whisper API (nếu có) thay vì ước lượng bằng character ratio.
+   * Fallback về Needleman-Wunsch + character ratio nếu không có word timestamps.
    */
   private static alignSentencesWithWhisper(
     userSentences: string[],
     whisperSegs: { start: number; end: number; text: string }[],
-    durationMs: number
+    durationMs: number,
+    whisperWords?: WhisperWord[]
   ): Segment[] {
-    // 1. Tách Whisper segments thành các từ kèm time (dựa trên character ratio)
+    // 1. Build timed words — prefer Whisper word-level timestamps
     interface TimedWord {
       word: string;
       startMs: number;
       endMs: number;
     }
+
     const timedWords: TimedWord[] = [];
-    for (const seg of whisperSegs) {
-      const segText = seg.text.trim();
-      const words = segText.split(/\s+/).filter(w => w.length > 0);
-      if (words.length === 0) continue;
 
-      const segStartMs = Math.round(seg.start * 1000);
-      const segEndMs = Math.round(seg.end * 1000);
-      const segDur = segEndMs - segStartMs;
-
-      // Tính length của từng từ để chia tỉ lệ
-      const charCounts = words.map(w => w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "").length || 1);
-      const totalChars = charCounts.reduce((a, b) => a + b, 0);
-
-      let currentStart = segStartMs;
-      for (let i = 0; i < words.length; i++) {
-        const wordDur = Math.round(segDur * (charCounts[i] / totalChars));
-        const wordEnd = currentStart + wordDur;
+    if (whisperWords && whisperWords.length > 0) {
+      // USE WORD-LEVEL TIMESTAMPS DIRECTLY (precise!)
+      for (const w of whisperWords) {
         timedWords.push({
-          word: words[i],
-          startMs: currentStart,
-          endMs: wordEnd
+          word: w.word,
+          startMs: Math.round(w.start * 1000),
+          endMs: Math.round(w.end * 1000),
         });
-        currentStart = wordEnd;
+      }
+      console.log(`[Align] Using ${timedWords.length} word-level timestamps from Whisper API (precise)`);
+    } else {
+      // FALLBACK: character-ratio estimation from segment-level timestamps
+      console.log(`[Align] No word-level timestamps, falling back to character ratio estimation`);
+      for (const seg of whisperSegs) {
+        const segText = seg.text.trim();
+        const words = segText.split(/\s+/).filter(w => w.length > 0);
+        if (words.length === 0) continue;
+
+        const segStartMs = Math.round(seg.start * 1000);
+        const segEndMs = Math.round(seg.end * 1000);
+        const segDur = segEndMs - segStartMs;
+
+        const charCounts = words.map(w => w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "").length || 1);
+        const totalChars = charCounts.reduce((a, b) => a + b, 0);
+
+        let currentStart = segStartMs;
+        for (let i = 0; i < words.length; i++) {
+          const wordDur = Math.round(segDur * (charCounts[i] / totalChars));
+          const wordEnd = currentStart + wordDur;
+          timedWords.push({
+            word: words[i],
+            startMs: currentStart,
+            endMs: wordEnd
+          });
+          currentStart = wordEnd;
+        }
       }
     }
 
@@ -327,16 +351,19 @@ export class AutocutService {
       }
     }
 
-    // 7. Tạo segments với padding (tránh nuốt từ)
-    const PRE_PAD_MS = 300;
-    const POST_PAD_MS = 200;
-
+    // 7. Tạo segments với DYNAMIC padding (dựa trên gap thực tế)
     const segments: Segment[] = finalSentences.map((s, i) => {
       const prevEnd = i > 0 ? finalSentences[i - 1].endMs : 0;
-      const startMs = Math.max(prevEnd, s.startMs - PRE_PAD_MS);
-
       const nextStart = i < finalSentences.length - 1 ? finalSentences[i + 1].startMs : durationMs;
-      const endMs = Math.min(nextStart, s.endMs + POST_PAD_MS);
+
+      // Dynamic padding based on actual gap size
+      const gapBefore = s.startMs - prevEnd;
+      const gapAfter = nextStart - s.endMs;
+      const prePad = Math.min(300, Math.round(gapBefore * 0.4));
+      const postPad = Math.min(200, Math.round(gapAfter * 0.4));
+
+      const startMs = Math.max(prevEnd, s.startMs - prePad);
+      const endMs = Math.min(nextStart, s.endMs + postPad);
 
       return {
         id: `seg_ai_align_${i + 1}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
@@ -602,22 +629,7 @@ export class AutocutService {
       s.replace(/<DOT>/g, '.').replace(/<ELLIPSIS>/g, '...')
     );
 
-    // Bước 4: Gộp câu quá ngắn (< 3 từ) vào câu trước hoặc sau
-    const merged: string[] = [];
-    for (let i = 0; i < sentences.length; i++) {
-      const wordCount = this.countWords(sentences[i]);
-      if (wordCount < 3 && merged.length > 0) {
-        // Gộp vào câu trước
-        merged[merged.length - 1] += ' ' + sentences[i];
-      } else if (wordCount < 3 && i < sentences.length - 1) {
-        // Gộp vào câu sau
-        sentences[i + 1] = sentences[i] + ' ' + sentences[i + 1];
-      } else {
-        merged.push(sentences[i]);
-      }
-    }
-
-    return merged;
+    return sentences;
   }
 
   /**
