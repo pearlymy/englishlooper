@@ -1,6 +1,33 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { StyleSheet, View, ActivityIndicator, Text, Platform, TouchableOpacity, PanResponder, BackHandler, TextInput } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, Text, Platform, TouchableOpacity, PanResponder, BackHandler, TextInput, Alert } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+
+// Polyfill Alert.alert for Web because default Alert.alert in react-native-web is a no-op stub
+if (Platform.OS === 'web') {
+  Alert.alert = (title: string, message?: string, buttons?: any[]) => {
+    const formattedMessage = message ? `\n\n${message}` : '';
+    const fullText = `${title}${formattedMessage}`;
+
+    if (buttons && buttons.length > 0) {
+      const cancelButton = buttons.find(b => b.style === 'cancel');
+      const otherButton = buttons.find(b => b.style !== 'cancel') || buttons[0];
+
+      if (buttons.length === 1) {
+        window.alert(fullText);
+        buttons[0].onPress?.();
+      } else {
+        const confirmed = window.confirm(fullText);
+        if (confirmed) {
+          otherButton.onPress?.();
+        } else {
+          cancelButton?.onPress?.();
+        }
+      }
+    } else {
+      window.alert(fullText);
+    }
+  };
+}
 import { onAuthStateChanged, User, signInWithPopup, GoogleAuthProvider, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { Audio } from 'expo-av';
 

@@ -166,17 +166,28 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
   const [loopProgress, setLoopProgress] = useState(0);
   const [waveformAmplitudes, setWaveformAmplitudes] = useState<number[]>([]);
 
+  // Tab mode: shadowing | dictation | translation
+  type PlayerTab = 'shadowing' | 'dictation' | 'translation';
+  const [activeTab, setActiveTab] = useState<PlayerTab>('shadowing');
+
   // Dictation states
-  const [isDictationMode, setIsDictationMode] = useState(false);
   const [dictationInput, setDictationInput] = useState('');
   const [showDictationAnswer, setShowDictationAnswer] = useState(false);
   const [isDictationChecked, setIsDictationChecked] = useState(false);
 
-  // Reset dictation states on segment change
+  // Translation practice states
+  const [translationInput, setTranslationInput] = useState('');
+  const [showTranslationAnswer, setShowTranslationAnswer] = useState(false);
+  const [isTranslationChecked, setIsTranslationChecked] = useState(false);
+
+  // Reset dictation + translation states on segment change
   useEffect(() => {
     setDictationInput('');
     setShowDictationAnswer(false);
     setIsDictationChecked(false);
+    setTranslationInput('');
+    setShowTranslationAnswer(false);
+    setIsTranslationChecked(false);
     // Also reset inline edit states
     setIsEditingTranscript(false);
     setEditTranscriptText('');
@@ -1064,6 +1075,206 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     );
   };
 
+  // ─── Translation Practice: check / hint / show answer ───
+  const handleCheckTranslation = () => {
+    if (!activeSegment) return;
+    const targetText = activeSegment.transcript || '';
+    const targetWords = targetText.split(/\s+/).filter(w => w.length > 0);
+    const inputWords = translationInput.trim().split(/\s+/).filter(w => w.length > 0);
+
+    const correctWordsCount = targetWords.filter((tWord, idx) => idx < inputWords.length && cleanWord(inputWords[idx]) === cleanWord(tWord)).length;
+    const pct = targetWords.length > 0 ? Math.round((correctWordsCount / targetWords.length) * 100) : 0;
+
+    setSegments(prevSegs =>
+      prevSegs.map(seg =>
+        seg.id === activeSegment.id
+          ? { ...seg, dictationAccuracy: Math.max(seg.dictationAccuracy || 0, pct) }
+          : seg
+      )
+    );
+
+    setIsTranslationChecked(true);
+  };
+
+  const handleTranslationHint = () => {
+    if (!activeSegment) return;
+    const targetText = activeSegment.transcript || '';
+    const targetWords = targetText.split(/\s+/).filter(w => w.length > 0);
+    const inputWords = translationInput.trim().split(/\s+/).filter(w => w.length > 0);
+
+    let firstErrorIdx = -1;
+    for (let i = 0; i < targetWords.length; i++) {
+      if (i >= inputWords.length || cleanWord(inputWords[i]) !== cleanWord(targetWords[i])) {
+        firstErrorIdx = i;
+        break;
+      }
+    }
+
+    if (firstErrorIdx !== -1) {
+      const correctWord = targetWords[firstErrorIdx];
+      const newWords = [...inputWords];
+      newWords[firstErrorIdx] = correctWord;
+      const updatedInput = newWords.slice(0, firstErrorIdx + 1).join(' ') + ' ';
+      setTranslationInput(updatedInput);
+      setIsTranslationChecked(false);
+    }
+  };
+
+  const renderTranslation = () => {
+    if (!activeSegment) return null;
+
+    // If no translation data, show prompt to translate first
+    if (!activeSegment.translation) {
+      return (
+        <View style={{ width: '100%', alignItems: 'center', paddingVertical: 20 }}>
+          <Text style={{ color: '#6b7280', fontSize: 14, textAlign: 'center', lineHeight: 22 }}>
+            ⚠️ Chưa có bản dịch tiếng Việt.{'\n'}
+            Hãy dùng chức năng{' '}
+            <Text style={{ color: '#a78bfa', fontWeight: '700' }}>Dịch & Phiên âm AI</Text>
+            {' '}trước nhé!
+          </Text>
+        </View>
+      );
+    }
+
+    const targetText = activeSegment.transcript || '';
+    const targetWords = targetText.split(/\s+/).filter(w => w.length > 0);
+    const inputWords = translationInput.trim().split(/\s+/).filter(w => w.length > 0);
+
+    const isFullyCorrect = targetWords.length > 0 &&
+      inputWords.length === targetWords.length &&
+      targetWords.every((tWord, idx) => cleanWord(inputWords[idx] || '') === cleanWord(tWord));
+
+    // Build word-by-word rendering for answer display
+    const wordRender = showTranslationAnswer ? (
+      <View style={{ width: '100%', alignItems: 'center', gap: 6 }}>
+        <Text style={[s.heroTranscript, isWide && s.heroTranscriptWide, { color: '#a78bfa' }]}>
+          {targetText}
+        </Text>
+        {activeSegment.ipa ? (
+          <Text style={[s.heroIpa, isWide && s.heroIpaWide]}>
+            {activeSegment.ipa}
+          </Text>
+        ) : null}
+      </View>
+    ) : isTranslationChecked ? (
+      <View style={s.dictationWordsWrap}>
+        {targetWords.map((tWord, idx) => {
+          if (idx < inputWords.length) {
+            const cleanTarget = cleanWord(tWord);
+            const cleanInput = cleanWord(inputWords[idx]);
+            if (cleanTarget === cleanInput) {
+              return (
+                <Text key={idx} style={[s.dictationWord, s.dictationWordCorrect]}>
+                  {tWord}{' '}
+                </Text>
+              );
+            } else {
+              return (
+                <Text key={idx} style={[s.dictationWord, s.dictationWordIncorrect]}>
+                  {inputWords[idx] || '?'}{' '}
+                </Text>
+              );
+            }
+          } else {
+            const strippedWord = tWord.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "");
+            const punctuation = tWord.substring(strippedWord.length);
+            const underscores = '_'.repeat(Math.max(1, strippedWord.length));
+            return (
+              <Text key={idx} style={[s.dictationWord, s.dictationWordMissing]}>
+                {underscores}{punctuation}{' '}
+              </Text>
+            );
+          }
+        })}
+      </View>
+    ) : null;
+
+    const correctWordsCount = targetWords.filter((tWord, idx) => idx < inputWords.length && cleanWord(inputWords[idx]) === cleanWord(tWord)).length;
+    const pct = targetWords.length > 0 ? Math.round((correctWordsCount / targetWords.length) * 100) : 0;
+
+    return (
+      <View style={{ width: '100%', alignItems: 'center' }}>
+        {/* Vietnamese prompt */}
+        <View style={{
+          width: '100%',
+          backgroundColor: 'rgba(16,185,129,0.06)',
+          borderWidth: 1,
+          borderColor: 'rgba(16,185,129,0.15)',
+          borderRadius: 12,
+          paddingVertical: 14,
+          paddingHorizontal: 16,
+          marginBottom: 12,
+          alignItems: 'center',
+        }}>
+          <Text style={{ color: '#6b7280', fontSize: 10, fontWeight: '700', letterSpacing: 1, marginBottom: 4, textTransform: 'uppercase' }}>
+            🇻🇳 Dịch sang tiếng Anh
+          </Text>
+          <Text style={{ color: '#34d399', fontSize: 17, fontWeight: '700', textAlign: 'center', lineHeight: 26 }}>
+            {activeSegment.translation}
+          </Text>
+        </View>
+
+        {/* Answer area (word-by-word check or show answer) */}
+        {wordRender}
+
+        {/* Score */}
+        {isTranslationChecked && !showTranslationAnswer && (
+          <View style={[
+            s.dictationScoreBox,
+            pct === 100 ? s.dictationScoreBoxPerfect : s.dictationScoreBoxNormal
+          ]}>
+            <Text style={[
+              s.dictationScoreText,
+              pct === 100 ? s.dictationScoreTextPerfect : s.dictationScoreTextNormal
+            ]}>
+              {pct === 100
+                ? `✨ HOÀN HẢO: 100% đúng (${correctWordsCount}/${targetWords.length} từ) ✨`
+                : `Kết quả: ${pct}% đúng (${correctWordsCount}/${targetWords.length} từ) — Hãy sửa các từ sai nhé!`}
+            </Text>
+          </View>
+        )}
+
+        {/* Input */}
+        <TextInput
+          style={s.dictationInput}
+          placeholder="Gõ câu tiếng Anh tại đây..."
+          placeholderTextColor="#4b5563"
+          autoCapitalize="none"
+          autoCorrect={false}
+          value={translationInput}
+          onChangeText={(text) => {
+            setTranslationInput(text);
+            setIsTranslationChecked(false);
+          }}
+          onSubmitEditing={handleCheckTranslation}
+          blurOnSubmit={false}
+        />
+
+        {/* Action buttons */}
+        <View style={s.dictationActions}>
+          <TouchableOpacity style={[s.dictationActionBtn, { borderColor: '#7c3aed' }]} onPress={handleCheckTranslation}>
+            <Text style={[s.dictationActionBtnText, { color: '#c4b5fd' }]}>🔍 Kiểm tra</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={s.dictationActionBtn} onPress={handleTranslationHint}>
+            <Text style={s.dictationActionBtnText}>💡 Gợi ý</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={s.dictationActionBtn} onPress={() => setShowTranslationAnswer(!showTranslationAnswer)}>
+            <Text style={s.dictationActionBtnText}>
+              {showTranslationAnswer ? '👁 Ẩn đáp án' : '👁 Hiện đáp án'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={s.dictationActionBtn} onPress={() => {
+            setTranslationInput('');
+            setIsTranslationChecked(false);
+          }}>
+            <Text style={s.dictationActionBtnText}>🧹 Xóa</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
   // ─── Computed ───
   const learnedCount = segments.filter(s => (s.studyCount || 0) > 0).length;
   const percentComplete = segments.length > 0 ? Math.round((learnedCount / segments.length) * 100) : 0;
@@ -1103,16 +1314,16 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
 
         {/* Center: text */}
         <View style={s.tlCenter}>
-          <Text style={[s.tlText, isActive && s.tlTextActive, isDictationMode && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={2}>
+          <Text style={[s.tlText, isActive && s.tlTextActive, (activeTab === 'dictation' || activeTab === 'translation') && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={2}>
             {item.transcript || `Đoạn nghe ${item.index}`}
           </Text>
           {item.ipa ? (
-            <Text style={[s.tlIpa, isActive && s.tlIpaActive, isDictationMode && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={1}>
+            <Text style={[s.tlIpa, isActive && s.tlIpaActive, (activeTab === 'dictation' || activeTab === 'translation') && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={1}>
               {item.ipa}
             </Text>
           ) : null}
           {item.translation ? (
-            <Text style={[s.tlTranslation, isActive && s.tlTranslationActive, isDictationMode && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={1}>
+            <Text style={[s.tlTranslation, isActive && s.tlTranslationActive, activeTab === 'dictation' && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={1}>
               {item.translation}
             </Text>
           ) : null}
@@ -1193,26 +1404,34 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
         {activeSegment && (
           <View style={s.heroTabs}>
             <TouchableOpacity
-              style={[s.heroTab, !isDictationMode && s.heroTabActive]}
-              onPress={() => setIsDictationMode(false)}
+              style={[s.heroTab, activeTab === 'shadowing' && s.heroTabActive]}
+              onPress={() => setActiveTab('shadowing')}
               activeOpacity={0.7}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Text style={[s.heroTabTxt, !isDictationMode && s.heroTabTxtActive]}>🎧 Shadowing</Text>
+              <Text style={[s.heroTabTxt, activeTab === 'shadowing' && s.heroTabTxtActive]}>🎧 Nghe</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[s.heroTab, isDictationMode && s.heroTabActive]}
-              onPress={() => setIsDictationMode(true)}
+              style={[s.heroTab, activeTab === 'dictation' && s.heroTabActive]}
+              onPress={() => setActiveTab('dictation')}
               activeOpacity={0.7}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Text style={[s.heroTabTxt, isDictationMode && s.heroTabTxtActive]}>✍️ Nghe viết</Text>
+              <Text style={[s.heroTabTxt, activeTab === 'dictation' && s.heroTabTxtActive]}>✍️ Chính tả</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.heroTab, activeTab === 'translation' && s.heroTabActive]}
+              onPress={() => setActiveTab('translation')}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={[s.heroTabTxt, activeTab === 'translation' && s.heroTabTxtActive]}>🔄 Dịch câu</Text>
             </TouchableOpacity>
           </View>
         )}
 
         <View style={s.heroBody}>
-          {!isDictationMode ? (
+          {activeTab === 'shadowing' ? (
             <View style={{ alignItems: 'center', width: '100%', gap: 6 }}>
               {/* ── Inline Editable Transcript ── */}
               {isEditingTranscript && activeSegment ? (
@@ -1319,9 +1538,13 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
                 </Text>
               ) : null}
             </View>
-          ) : (
+          ) : activeTab === 'dictation' ? (
             <View style={{ width: '100%' }}>
               {renderDictation()}
+            </View>
+          ) : (
+            <View style={{ width: '100%' }}>
+              {renderTranslation()}
             </View>
           )}
         </View>
@@ -2000,16 +2223,16 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
 
                       {/* Center: text */}
                       <View style={s.tlCenter}>
-                        <Text style={[s.tlText, isActive && s.tlTextActive, isDictationMode && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={2}>
+                        <Text style={[s.tlText, isActive && s.tlTextActive, (activeTab === 'dictation' || activeTab === 'translation') && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={2}>
                           {item.transcript || `Đoạn nghe ${item.index}`}
                         </Text>
                         {item.ipa ? (
-                          <Text style={[s.tlIpa, isActive && s.tlIpaActive, isDictationMode && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={1}>
+                          <Text style={[s.tlIpa, isActive && s.tlIpaActive, (activeTab === 'dictation' || activeTab === 'translation') && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={1}>
                             {item.ipa}
                           </Text>
                         ) : null}
                         {item.translation ? (
-                          <Text style={[s.tlTranslation, isActive && s.tlTranslationActive, isDictationMode && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={1}>
+                          <Text style={[s.tlTranslation, isActive && s.tlTranslationActive, activeTab === 'dictation' && (IS_WEB ? { filter: 'blur(5px)' } as any : { opacity: 0.15 })]} numberOfLines={1}>
                             {item.translation}
                           </Text>
                         ) : null}
