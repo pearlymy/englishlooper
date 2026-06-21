@@ -77,59 +77,91 @@ export class AutocutService {
       }
     }
 
-    // ── Không có transcript: gộp Whisper phrases thành CÂU HOÀN CHỈNH, rồi gộp 2-by-2 ──
-    // Bước 1: Merge Whisper phrases thành câu hoàn chỉnh (kết thúc bằng . ? ! ...)
+
+    // ── Không có transcript: dùng WORD-LEVEL timestamps để tách câu chính xác ──
+    // Whisper raw segments đôi khi rất dài (10-30s) và thiếu dấu câu
+    // → Dùng word-level data để tách chính xác từng câu
     onProgress?.('🤖 Đang phân tích câu từ âm thanh...');
-    const SENTENCE_ENDERS = /[.!?。？！…]+\s*$/;
-    const MAX_SENTENCE_SEC = 15;
 
-    const mergedSentences: { start: number; end: number; text: string }[] = [];
-    if (whisperSegs.length > 0) {
-      let accStart = whisperSegs[0].start;
-      let accEnd = whisperSegs[0].end;
-      let accText = whisperSegs[0].text;
+    const SENTENCE_END_REGEX = /[.!?。？！…]+$/;
+    const MAX_WORDS_PER_SENTENCE = 15; // Nếu không có dấu câu, cắt sau 15 từ
 
-      for (let i = 1; i < whisperSegs.length; i++) {
-        const seg = whisperSegs[i];
-        const hasSentenceEnd = SENTENCE_ENDERS.test(accText.trim());
-        const wouldBeTooLong = seg.end - accStart > MAX_SENTENCE_SEC;
+    // Bước 1: Xây dựng danh sách câu từ word-level timestamps
+    const sentences: { start: number; end: number; text: string }[] = [];
 
-        if (hasSentenceEnd || wouldBeTooLong) {
-          // Câu hiện tại đã kết thúc → đẩy ra và bắt đầu câu mới
-          mergedSentences.push({ start: accStart, end: accEnd, text: accText.trim() });
-          accStart = seg.start;
-          accEnd = seg.end;
-          accText = seg.text;
-        } else {
-          // Chưa kết thúc câu → tích lũy
-          accEnd = seg.end;
-          accText += ' ' + seg.text;
+    if (whisperWords.length > 0) {
+      // Dùng word-level timestamps (chính xác nhất)
+      let sentenceStart = whisperWords[0].start;
+      let sentenceWords: string[] = [];
+
+      for (let i = 0; i < whisperWords.length; i++) {
+        const w = whisperWords[i];
+        sentenceWords.push(w.word);
+
+        const wordText = w.word.trim();
+        const isSentenceEnd = SENTENCE_END_REGEX.test(wordText);
+        const tooManyWords = sentenceWords.length >= MAX_WORDS_PER_SENTENCE;
+        const isLastWord = i === whisperWords.length - 1;
+
+        // Kiểm tra có pause lớn (>0.5s) giữa từ hiện tại và từ tiếp theo
+        const nextWord = whisperWords[i + 1];
+        const hasPause = nextWord ? (nextWord.start - w.end) > 0.5 : false;
+
+        if (isSentenceEnd || tooManyWords || isLastWord || hasPause) {
+          sentences.push({
+            start: sentenceStart,
+            end: w.end,
+            text: sentenceWords.join(' ').trim()
+          });
+          sentenceWords = [];
+          sentenceStart = nextWord ? nextWord.start : w.end;
         }
       }
-      // Đẩy câu cuối
-      if (accText.trim()) {
-        mergedSentences.push({ start: accStart, end: accEnd, text: accText.trim() });
-      }
-
-      // Gộp câu cuối nếu quá ngắn (< 2s)
-      if (mergedSentences.length > 1) {
-        const last = mergedSentences[mergedSentences.length - 1];
-        if (last.end - last.start < 2) {
-          const prev = mergedSentences[mergedSentences.length - 2];
-          prev.end = last.end;
-          prev.text = (prev.text + ' ' + last.text).trim();
-          mergedSentences.pop();
+    } else if (whisperSegs.length > 0) {
+      // Fallback: dùng segment-level nếu không có word data
+      // Tách từng segment dài thành nhiều câu bằng regex
+      for (const seg of whisperSegs) {
+        const rawText = seg.text.trim();
+        // Tách bằng dấu câu
+        const subSentences = rawText.split(/(?<=[.!?。？！…])\s+/).filter(s => s.trim());
+        if (subSentences.length <= 1) {
+          sentences.push({ start: seg.start, end: seg.end, text: rawText });
+        } else {
+          // Chia đều thời gian cho các sub-sentences
+          const totalDur = seg.end - seg.start;
+          const totalChars = subSentences.reduce((sum, s) => sum + s.length, 0);
+          let cursor = seg.start;
+          for (const sub of subSentences) {
+            const dur = (sub.length / totalChars) * totalDur;
+            sentences.push({
+              start: cursor,
+              end: cursor + dur,
+              text: sub.trim()
+            });
+            cursor += dur;
+          }
         }
       }
     }
 
-    console.log(`[WhisperSplit] Merged ${whisperSegs.length} phrases → ${mergedSentences.length} complete sentences`);
+    // Gộp câu cuối nếu quá ngắn (< 1.5s)
+    if (sentences.length > 1) {
+      const last = sentences[sentences.length - 1];
+      if (last.end - last.start < 1.5) {
+        const prev = sentences[sentences.length - 2];
+        prev.end = last.end;
+        prev.text = (prev.text + ' ' + last.text).trim();
+        sentences.pop();
+      }
+    }
+
+    console.log(`[WhisperSplit] Built ${sentences.length} sentences from ${whisperWords.length} words / ${whisperSegs.length} raw segments`);
 
     // Bước 2: Gộp các câu hoàn chỉnh 2-by-2
-    const grouped: typeof mergedSentences = [];
-    for (let i = 0; i < mergedSentences.length; i += 2) {
-      const s1 = mergedSentences[i];
-      const s2 = mergedSentences[i + 1];
+    const grouped: typeof sentences = [];
+    for (let i = 0; i < sentences.length; i += 2) {
+      const s1 = sentences[i];
+      const s2 = sentences[i + 1];
       if (s2) {
         grouped.push({
           start: s1.start,
@@ -171,12 +203,12 @@ export class AutocutService {
     });
 
     // Debug: log first 5 segments
-    console.log(`[WhisperSplit] ${mergedSentences.length} sentences → ${grouped.length} groups (2 sentences each):`);
+    console.log(`[WhisperSplit] ${sentences.length} sentences → ${grouped.length} groups (2 sentences each):`);
     segments.slice(0, 5).forEach(s =>
       console.log(`  #${s.index}: ${s.startTimeMs}ms → ${s.endTimeMs}ms (${s.durationMs}ms) "${(s.transcript || '').substring(0, 80)}..."`)
     );
 
-    onProgress?.(`✅ AI cắt ${segments.length} đoạn (${mergedSentences.length} câu, 2 câu/đoạn)`);
+    onProgress?.(`✅ AI cắt ${segments.length} đoạn (${sentences.length} câu, 2 câu/đoạn)`);
 
     return { segments, durationMs, method: 'whisper-ai' };
   }
