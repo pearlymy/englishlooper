@@ -266,7 +266,12 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
 
   // ─── AI Translate (IPA + Vietnamese) ───
   const handleAITranslate = async () => {
-    if (!resolvedApiKey) {
+    let apiKey = resolvedApiKey;
+    if (!apiKey) {
+      apiKey = await WhisperService.getApiKey() || '';
+      if (apiKey) setResolvedApiKey(apiKey);
+    }
+    if (!apiKey) {
       Alert.alert('Thiếu API Key', 'Cần API Key để dịch và phiên âm. Vui lòng vào Import và lưu API Key trước.');
       return;
     }
@@ -284,7 +289,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
     try {
       const translations = await AITranslationService.translateAndPhoneticsBatch(
         sentencesToTranslate,
-        resolvedApiKey
+        resolvedApiKey || apiKey
       );
 
       setSegments(prev =>
@@ -319,7 +324,12 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
 
   // ─── AI Re-transcribe (dùng pipeline mới với word-level timestamps) ───
   const handleRetranscribe = async () => {
-    if (!resolvedApiKey) {
+    let apiKey = resolvedApiKey;
+    if (!apiKey) {
+      apiKey = await WhisperService.getApiKey() || '';
+      if (apiKey) setResolvedApiKey(apiKey);
+    }
+    if (!apiKey) {
       Alert.alert('Thiếu API Key', 'Cần API Key để AI cắt câu lại.');
       return;
     }
@@ -348,7 +358,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
         undefined,
         (msg) => setRetranscribeProgress(msg),
         true, // useAI
-        resolvedApiKey
+        resolvedApiKey || apiKey
       );
 
       // Optionally translate
@@ -362,7 +372,7 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
         if (sentencesToTranslate.length > 0) {
           const translations = await AITranslationService.translateAndPhoneticsBatch(
             sentencesToTranslate,
-            resolvedApiKey
+            resolvedApiKey || apiKey
           );
           finalSegments = newSegments.map(seg => {
             const match = translations.find(t => t.index === seg.index);

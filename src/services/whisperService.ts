@@ -46,7 +46,15 @@ export class WhisperService {
    */
   static async getApiKey(): Promise<string | null> {
     try {
-      return await AsyncStorage.getItem(API_KEY_STORAGE);
+      const stored = await AsyncStorage.getItem(API_KEY_STORAGE);
+      if (stored) return stored;
+      // Fallback: check env variable and auto-save
+      const envKey = (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_GROQ_API_KEY) || '';
+      if (envKey) {
+        await AsyncStorage.setItem(API_KEY_STORAGE, envKey);
+        return envKey;
+      }
+      return null;
     } catch {
       return null;
     }
