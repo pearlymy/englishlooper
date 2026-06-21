@@ -1088,7 +1088,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     setSegments(prevSegs =>
       prevSegs.map(seg =>
         seg.id === activeSegment.id
-          ? { ...seg, dictationAccuracy: Math.max(seg.dictationAccuracy || 0, pct) }
+          ? { ...seg, translationAccuracy: Math.max(seg.translationAccuracy || 0, pct) }
           : seg
       )
     );
@@ -1282,6 +1282,9 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
   const dictDoneCount = segments.filter(s => s.dictationAccuracy !== undefined).length;
   const dictPercent = segments.length > 0 ? Math.round((dictDoneCount / segments.length) * 100) : 0;
 
+  const transDoneCount = segments.filter(s => s.translationAccuracy !== undefined).length;
+  const transPercent = segments.length > 0 ? Math.round((transDoneCount / segments.length) * 100) : 0;
+
   const segmentProgress = activeSegment
     ? Math.max(0, Math.min(1, (positionMs - activeSegment.startTimeMs) / (activeSegment.endTimeMs - activeSegment.startTimeMs)))
     : 0;
@@ -1332,6 +1335,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
           </Text>
         </View>
 
+
         {/* Right: study count & accuracy badges */}
         <View style={s.tlRight}>
           {item.dictationAccuracy !== undefined && (
@@ -1343,7 +1347,22 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
                 s.accuracyBadgeText,
                 item.dictationAccuracy === 100 ? s.accuracyBadgeTextPerfect : s.accuracyBadgeTextNormal
               ]}>
-                🎯 {item.dictationAccuracy}%
+                ✍️ {item.dictationAccuracy}%
+              </Text>
+            </View>
+          )}
+          {item.translationAccuracy !== undefined && (
+            <View style={[
+              s.accuracyBadge,
+              { borderColor: 'rgba(52,211,153,0.3)', backgroundColor: 'rgba(52,211,153,0.08)' },
+              item.translationAccuracy === 100 ? { borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)' } : null
+            ]}>
+              <Text style={[
+                s.accuracyBadgeText,
+                { color: '#34d399' },
+                item.translationAccuracy === 100 ? { color: '#10b981', fontWeight: 'bold' } : null
+              ]}>
+                🔄 {item.translationAccuracy}%
               </Text>
             </View>
           )}
@@ -1370,6 +1389,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
           <View style={s.headerStatsRow}>
             <Text style={s.headerPercent}>🎧 {percentComplete}%</Text>
             <Text style={s.headerPercentDictation}>✍️ {dictPercent}%</Text>
+            <Text style={[s.headerPercentDictation, { color: '#34d399' }]}>🔄 {transPercent}%</Text>
           </View>
         </View>
         <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
@@ -2252,7 +2272,22 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
                               s.accuracyBadgeText,
                               item.dictationAccuracy === 100 ? s.accuracyBadgeTextPerfect : s.accuracyBadgeTextNormal
                             ]}>
-                              🎯 {item.dictationAccuracy}%
+                              ✍️ {item.dictationAccuracy}%
+                            </Text>
+                          </View>
+                        )}
+                        {item.translationAccuracy !== undefined && (
+                          <View style={[
+                            s.accuracyBadge,
+                            { borderColor: 'rgba(52,211,153,0.3)', backgroundColor: 'rgba(52,211,153,0.08)' },
+                            item.translationAccuracy === 100 ? { borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.15)' } : null
+                          ]}>
+                            <Text style={[
+                              s.accuracyBadgeText,
+                              { color: '#34d399' },
+                              item.translationAccuracy === 100 ? { color: '#10b981', fontWeight: 'bold' } : null
+                            ]}>
+                              🔄 {item.translationAccuracy}%
                             </Text>
                           </View>
                         )}

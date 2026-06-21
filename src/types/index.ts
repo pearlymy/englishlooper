@@ -8,6 +8,7 @@ export interface Segment {
   status: 'not_started' | 'learning' | 'mastered';
   studyCount?: number;
   dictationAccuracy?: number;
+  translationAccuracy?: number;
   ipa?: string;
   translation?: string;
 }

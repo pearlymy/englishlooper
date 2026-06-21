@@ -70,7 +70,7 @@ export default function HomeScreen({
   const [refreshing, setRefreshing] = useState(false);
   const [dimensions, setDimensions] = useState(Dimensions.get('window'));
   const [syncToast, setSyncToast] = useState<string | null>(null);
-  const [progressMode, setProgressMode] = useState<'listening' | 'dictation'>('listening');
+  const [progressMode, setProgressMode] = useState<'listening' | 'dictation' | 'translation'>('listening');
 
   // Folder states
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -374,8 +374,27 @@ export default function HomeScreen({
     return Math.round(sum / withAccuracy.length);
   };
 
+  const getTranslationProgress = (p: Project) => {
+    if (!p.segments.length) return 0;
+    const done = p.segments.filter(s => s.translationAccuracy !== undefined).length;
+    return Math.round((done / p.segments.length) * 100);
+  };
+
+  const getTranslationAvgAccuracy = (p: Project) => {
+    const withAccuracy = p.segments.filter(s => s.translationAccuracy !== undefined);
+    if (withAccuracy.length === 0) return 0;
+    const sum = withAccuracy.reduce((acc, s) => acc + (s.translationAccuracy || 0), 0);
+    return Math.round(sum / withAccuracy.length);
+  };
+
   const getProgress = (p: Project) => {
-    return progressMode === 'dictation' ? getDictationProgress(p) : getListeningProgress(p);
+    if (progressMode === 'dictation') {
+      return getDictationProgress(p);
+    } else if (progressMode === 'translation') {
+      return getTranslationProgress(p);
+    } else {
+      return getListeningProgress(p);
+    }
   };
 
   const getProgressColor = (pct: number) => {
@@ -383,6 +402,12 @@ export default function HomeScreen({
       if (pct >= 100) return '#10b981';
       if (pct >= 40) return '#22c55e';
       if (pct > 0) return '#34d399';
+      return '#4b5563';
+    }
+    if (progressMode === 'translation') {
+      if (pct >= 100) return '#10b981';
+      if (pct >= 40) return '#0d9488';
+      if (pct > 0) return '#2dd4bf';
       return '#4b5563';
     }
     if (pct >= 100) return '#10b981';
@@ -440,6 +465,11 @@ export default function HomeScreen({
     const dictNotDone = item.segments.length - dictDone;
     const dictAvg = getDictationAvgAccuracy(item);
 
+    // Translation stats
+    const transDone = item.segments.filter(s => s.translationAccuracy !== undefined).length;
+    const transNotDone = item.segments.length - transDone;
+    const transAvg = getTranslationAvgAccuracy(item);
+
     const ctaLabel = pct === 0 ? 'Bắt đầu' : pct >= 100 ? 'Ôn lại' : 'Tiếp tục';
     const ctaIcon = pct >= 100 ? '✓' : '▶';
 
@@ -481,7 +511,7 @@ export default function HomeScreen({
                   </View>
                 )}
               </>
-            ) : (
+            ) : progressMode === 'dictation' ? (
               <>
                 {dictNotDone > 0 && (
                   <View style={[styles.statPill, { backgroundColor: 'rgba(107,114,128,0.12)', borderColor: 'rgba(107,114,128,0.25)' }]}>
@@ -498,6 +528,26 @@ export default function HomeScreen({
                 {dictAvg > 0 && (
                   <View style={[styles.statPill, { backgroundColor: 'rgba(34,197,94,0.12)', borderColor: 'rgba(34,197,94,0.25)' }]}>
                     <Text style={[styles.statText, { color: '#22c55e', fontWeight: '700' }]}>⌀ {dictAvg}%</Text>
+                  </View>
+                )}
+              </>
+            ) : (
+              <>
+                {transNotDone > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(107,114,128,0.12)', borderColor: 'rgba(107,114,128,0.25)' }]}>
+                    <View style={[styles.statDot, { backgroundColor: '#6b7280' }]} />
+                    <Text style={[styles.statText, { color: '#9ca3af' }]}>{transNotDone}</Text>
+                  </View>
+                )}
+                {transDone > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(16,185,129,0.12)', borderColor: 'rgba(16,185,129,0.25)' }]}>
+                    <View style={[styles.statDot, { backgroundColor: '#10b981' }]} />
+                    <Text style={[styles.statText, { color: '#34d399' }]}>{transDone}</Text>
+                  </View>
+                )}
+                {transAvg > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(13,148,136,0.12)', borderColor: 'rgba(13,148,136,0.25)' }]}>
+                    <Text style={[styles.statText, { color: '#2dd4bf', fontWeight: '700' }]}>⌀ {transAvg}%</Text>
                   </View>
                 )}
               </>
@@ -548,6 +598,9 @@ export default function HomeScreen({
     if (progressMode === 'dictation') {
       const dictSegments = folderProjects.reduce((sum, p) => sum + p.segments.filter(s => s.dictationAccuracy !== undefined).length, 0);
       folderPct = totalSegments > 0 ? Math.round((dictSegments / totalSegments) * 100) : 0;
+    } else if (progressMode === 'translation') {
+      const transSegments = folderProjects.reduce((sum, p) => sum + p.segments.filter(s => s.translationAccuracy !== undefined).length, 0);
+      folderPct = totalSegments > 0 ? Math.round((transSegments / totalSegments) * 100) : 0;
     } else {
       const learnedSegments = folderProjects.reduce((sum, p) => sum + p.segments.filter(s => (s.studyCount || 0) > 0).length, 0);
       folderPct = totalSegments > 0 ? Math.round((learnedSegments / totalSegments) * 100) : 0;
@@ -556,6 +609,8 @@ export default function HomeScreen({
     // Color based on progress and mode
     const accentColor = progressMode === 'dictation'
       ? (folderPct >= 100 ? '#10b981' : folderPct > 0 ? '#22c55e' : '#4b5563')
+      : progressMode === 'translation'
+      ? (folderPct >= 100 ? '#10b981' : folderPct > 0 ? '#0d9488' : '#4b5563')
       : (folderPct >= 100 ? '#10b981' : folderPct > 0 ? '#a78bfa' : '#7c3aed');
 
     return (
@@ -813,6 +868,13 @@ export default function HomeScreen({
               activeOpacity={0.7}
             >
               <Text style={[styles.toggleText, progressMode === 'dictation' && styles.toggleTextActiveDictation]}>✍️ Chính tả</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.togglePill, progressMode === 'translation' && styles.togglePillActiveTranslation]}
+              onPress={() => setProgressMode('translation')}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.toggleText, progressMode === 'translation' && styles.toggleTextActiveTranslation]}>🔄 Dịch câu</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1141,6 +1203,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(16,185,129,0.35)',
   },
+  togglePillActiveTranslation: {
+    backgroundColor: 'rgba(13,148,136,0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(13,148,136,0.35)',
+  },
   toggleText: {
     fontSize: 12,
     fontWeight: '600',
@@ -1151,6 +1218,9 @@ const styles = StyleSheet.create({
   },
   toggleTextActiveDictation: {
     color: '#34d399',
+  },
+  toggleTextActiveTranslation: {
+    color: '#2dd4bf',
   },
   listContent: {
     paddingHorizontal: 20,
