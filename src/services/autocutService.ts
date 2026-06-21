@@ -66,11 +66,9 @@ export class AutocutService {
     const whisperSegs = whisperResult.segments;
     const whisperWords = whisperResult.words || [];
 
-    const activeTranscript = transcriptText?.trim() || whisperResult.text;
-
-    if (activeTranscript?.trim()) {
+    if (transcriptText?.trim()) {
       onProgress?.('🤖 Đang khớp transcript với âm thanh...');
-      const sentences = this.smartSplitTranscript(activeTranscript);
+      const sentences = this.smartSplitTranscript(transcriptText);
       const userSentences = this.groupSentences2by2(sentences);
       if (userSentences.length > 0) {
         const segments = this.alignSentencesWithWhisper(userSentences, whisperSegs, durationMs, whisperWords);
@@ -79,39 +77,83 @@ export class AutocutService {
       }
     }
 
-    // Gộp raw Whisper segments 2-by-2 (2 câu 1 cụm)
-    const groupedWhisperSegs: typeof whisperSegs = [];
-    for (let i = 0; i < whisperSegs.length; i += 2) {
-      const seg1 = whisperSegs[i];
-      const seg2 = whisperSegs[i + 1];
-      if (seg2) {
-        groupedWhisperSegs.push({
-          start: seg1.start,
-          end: seg2.end,
-          text: (seg1.text + ' ' + seg2.text).trim()
-        });
-      } else {
-        groupedWhisperSegs.push(seg1);
+    // ── Không có transcript: gộp Whisper phrases thành CÂU HOÀN CHỈNH, rồi gộp 2-by-2 ──
+    // Bước 1: Merge Whisper phrases thành câu hoàn chỉnh (kết thúc bằng . ? ! ...)
+    onProgress?.('🤖 Đang phân tích câu từ âm thanh...');
+    const SENTENCE_ENDERS = /[.!?。？！…]+\s*$/;
+    const MAX_SENTENCE_SEC = 15;
+
+    const mergedSentences: { start: number; end: number; text: string }[] = [];
+    if (whisperSegs.length > 0) {
+      let accStart = whisperSegs[0].start;
+      let accEnd = whisperSegs[0].end;
+      let accText = whisperSegs[0].text;
+
+      for (let i = 1; i < whisperSegs.length; i++) {
+        const seg = whisperSegs[i];
+        const hasSentenceEnd = SENTENCE_ENDERS.test(accText.trim());
+        const wouldBeTooLong = seg.end - accStart > MAX_SENTENCE_SEC;
+
+        if (hasSentenceEnd || wouldBeTooLong) {
+          // Câu hiện tại đã kết thúc → đẩy ra và bắt đầu câu mới
+          mergedSentences.push({ start: accStart, end: accEnd, text: accText.trim() });
+          accStart = seg.start;
+          accEnd = seg.end;
+          accText = seg.text;
+        } else {
+          // Chưa kết thúc câu → tích lũy
+          accEnd = seg.end;
+          accText += ' ' + seg.text;
+        }
+      }
+      // Đẩy câu cuối
+      if (accText.trim()) {
+        mergedSentences.push({ start: accStart, end: accEnd, text: accText.trim() });
+      }
+
+      // Gộp câu cuối nếu quá ngắn (< 2s)
+      if (mergedSentences.length > 1) {
+        const last = mergedSentences[mergedSentences.length - 1];
+        if (last.end - last.start < 2) {
+          const prev = mergedSentences[mergedSentences.length - 2];
+          prev.end = last.end;
+          prev.text = (prev.text + ' ' + last.text).trim();
+          mergedSentences.pop();
+        }
       }
     }
 
-    // Dynamic padding: calculate based on actual gaps between segments
-    const segments: Segment[] = groupedWhisperSegs.map((seg, i) => {
+    console.log(`[WhisperSplit] Merged ${whisperSegs.length} phrases → ${mergedSentences.length} complete sentences`);
+
+    // Bước 2: Gộp các câu hoàn chỉnh 2-by-2
+    const grouped: typeof mergedSentences = [];
+    for (let i = 0; i < mergedSentences.length; i += 2) {
+      const s1 = mergedSentences[i];
+      const s2 = mergedSentences[i + 1];
+      if (s2) {
+        grouped.push({
+          start: s1.start,
+          end: s2.end,
+          text: (s1.text + ' ' + s2.text).trim()
+        });
+      } else {
+        grouped.push(s1);
+      }
+    }
+
+    // Bước 3: Tạo segments với dynamic padding
+    const segments: Segment[] = grouped.map((seg, i) => {
       const rawStart = Math.round(seg.start * 1000);
       const rawEnd = Math.round(seg.end * 1000);
 
-      // Calculate dynamic padding based on actual gap to neighbors
-      const prevEnd = i > 0 ? Math.round(groupedWhisperSegs[i - 1].end * 1000) : 0;
-      const nextStart = i < groupedWhisperSegs.length - 1
-        ? Math.round(groupedWhisperSegs[i + 1].start * 1000)
+      const prevEnd = i > 0 ? Math.round(grouped[i - 1].end * 1000) : 0;
+      const nextStart = i < grouped.length - 1
+        ? Math.round(grouped[i + 1].start * 1000)
         : durationMs;
 
       const gapBefore = rawStart - prevEnd;
       const gapAfter = nextStart - rawEnd;
-
-      // Pre-pad: use up to 40% of gap before, capped at 300ms
       const prePad = Math.min(300, Math.round(gapBefore * 0.4));
-      // Post-pad: use up to 40% of gap after, capped at 200ms
       const postPad = Math.min(200, Math.round(gapAfter * 0.4));
 
       const startMs = Math.max(prevEnd, rawStart - prePad);
@@ -129,12 +171,12 @@ export class AutocutService {
     });
 
     // Debug: log first 5 segments
-    console.log('[WhisperSplit] First 5 segments (2-by-2 grouping + dynamic padding):');
+    console.log(`[WhisperSplit] ${mergedSentences.length} sentences → ${grouped.length} groups (2 sentences each):`);
     segments.slice(0, 5).forEach(s =>
-      console.log(`  #${s.index}: ${s.startTimeMs}ms → ${s.endTimeMs}ms (${s.durationMs}ms) "${(s.transcript || '').substring(0, 60)}..."`)
+      console.log(`  #${s.index}: ${s.startTimeMs}ms → ${s.endTimeMs}ms (${s.durationMs}ms) "${(s.transcript || '').substring(0, 80)}..."`)
     );
 
-    onProgress?.(`✅ AI cắt ${segments.length} đoạn (2 câu/đoạn)`);
+    onProgress?.(`✅ AI cắt ${segments.length} đoạn (${mergedSentences.length} câu, 2 câu/đoạn)`);
 
     return { segments, durationMs, method: 'whisper-ai' };
   }

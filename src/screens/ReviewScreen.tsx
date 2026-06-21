@@ -341,11 +341,11 @@ export default function ReviewScreen({ pendingData, onConfirm, onRerunAI, onBack
         }
       }
 
-      // Re-run AI transcription with the original transcript to keep 2-by-2 grouping and text matching
-      const originalTranscript = pendingData.transcriptText || segments.map(s => s.transcript || '').join(' ').trim();
+      // Re-run AI transcription — let Whisper detect sentences from audio
+      // (KHÔNG truyền transcript cũ vì sẽ gộp sai câu từ các unit khác nhau)
       const { segments: newSegments, durationMs } = await AutocutService.analyzeAndSplit(
         audioUri,
-        originalTranscript || undefined,
+        undefined,
         (msg) => setRetranscribeProgress(msg),
         true, // useAI
         resolvedApiKey
