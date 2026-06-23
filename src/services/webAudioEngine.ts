@@ -53,6 +53,12 @@ export class WebAudioEngine {
   // Bound event handlers for cleanup
   private boundVisibilityHandler: (() => void) | null = null;
 
+  // Callback to notify AudioService of background/foreground transitions
+  private onVisibilityChange: ((isHidden: boolean) => void) | null = null;
+
+  // Track if audio was playing before going to background
+  private wasPlayingBeforeBackground: boolean = false;
+
   /**
    * Helper to check if a source URL is a WAV file
    */
@@ -416,6 +422,15 @@ export class WebAudioEngine {
   }
 
   /**
+   * Is current file using Web Audio API? (WAV mode)
+   * WAV files use Web Audio API + shadow audio in background.
+   * Shadow audio CANNOT seek accurately on blob WAV (Chrome bug).
+   */
+  get isWavMode(): boolean {
+    return this.useWebAudioPlayback;
+  }
+
+  /**
    * Duration in ms
    */
   get durationMs(): number {
@@ -427,6 +442,15 @@ export class WebAudioEngine {
    */
   setOnPositionUpdate(callback: (positionMs: number, isPlaying: boolean) => void) {
     this.onPositionUpdate = callback;
+  }
+
+  /**
+   * Set callback for background/foreground visibility transitions.
+   * Called with isHidden=true when page goes to background,
+   * and isHidden=false when page returns to foreground.
+   */
+  setOnVisibilityChange(callback: (isHidden: boolean) => void) {
+    this.onVisibilityChange = callback;
   }
 
   /**
@@ -640,16 +664,21 @@ export class WebAudioEngine {
 
   /**
    * Page going to background:
-   * - WAV: Save position → stop Web Audio API → start shadow <audio>
-   * - MP3: Nothing needed, <audio> element keeps playing naturally
+   * - Notify AudioService to FREEZE segment loop logic (prevents chaos from throttled timers)
+   * - WAV: Switch from Web Audio API to shadow <audio> for continuous background playback
+   * - MP3: <audio> element keeps playing naturally
    */
   private handleGoToBackground() {
     console.log('[WebAudioEngine] Page going to background...');
     this.isInBackground = true;
 
+    // Notify AudioService FIRST — it will freeze segment loop logic
+    this.onVisibilityChange?.(true);
+
     if (this.useWebAudioPlayback && this._isPlaying && this.shadowAudio) {
       // Save current position from Web Audio API
       const pos = this.getPositionMs();
+      this.currentPositionMs = pos;
       console.log(`[WebAudioEngine] Switching WAV to shadow <audio> at ${(pos/1000).toFixed(1)}s`);
 
       // Stop Web Audio API source (it will be suspended by browser anyway)
@@ -673,6 +702,7 @@ export class WebAudioEngine {
    * Page returning from background:
    * - WAV: Get position from shadow <audio> → stop shadow → restart Web Audio API
    * - MP3: Ensure <audio> is still playing, restart position tracking
+   * - Notify AudioService to re-sync segment state
    */
   private handleReturnFromBackground() {
     console.log('[WebAudioEngine] Page returning from background...');
@@ -714,5 +744,9 @@ export class WebAudioEngine {
         this.startPositionTracking();
       }
     }
+
+    // Notify AudioService AFTER audio source is restored
+    // AudioService will re-sync active segment to current position
+    this.onVisibilityChange?.(false);
   }
 }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { StyleSheet, View, ActivityIndicator, Text, Platform, TouchableOpacity, PanResponder, BackHandler, TextInput, Alert } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, Text, Platform, TouchableOpacity, PanResponder, BackHandler, TextInput, Alert, Dimensions } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 
 // Polyfill Alert.alert for Web because default Alert.alert in react-native-web is a no-op stub
@@ -42,6 +42,7 @@ import HomeScreen from './src/screens/HomeScreen';
 import ImportScreen, { ReviewPendingData } from './src/screens/ImportScreen';
 import ReviewScreen from './src/screens/ReviewScreen';
 import PlayerScreen from './src/screens/PlayerScreen';
+import SidebarMenu, { SIDEBAR_WIDTH } from './src/components/SidebarMenu';
 
 export default function App() {
   // Parse URL synchronously to avoid dashboard flash
@@ -69,6 +70,15 @@ export default function App() {
   const [isGuestMode, setIsGuestMode] = useState(false);
   const [reviewPendingData, setReviewPendingData] = useState<ReviewPendingData | null>(null);
   const pendingProjectId = useRef<string | null>(initialUrl.projectId);
+  const [sidebarVisible, setSidebarVisible] = useState(false);
+  const [windowDimensions, setWindowDimensions] = useState(Dimensions.get('window'));
+  const isWideScreen = windowDimensions.width > 768;
+
+  // Track window dimensions for sidebar responsiveness
+  useEffect(() => {
+    const sub = Dimensions.addEventListener('change', ({ window }) => setWindowDimensions(window));
+    return () => sub?.remove();
+  }, []);
 
   const handleGoogleSignIn = async () => {
     try {
@@ -773,41 +783,77 @@ export default function App() {
       {...(Platform.OS !== 'web' ? panResponder.panHandlers : {})}
     >
       <StatusBar style="light" />
-      {screen === 'home' && (
-        <HomeScreen
-          projects={projects}
-          onRefresh={handleRefresh}
-          onOpenProject={handleOpenProject}
-          onNewProject={handleNewProject}
-          activeFolderId={activeFolderId}
-          setActiveFolderId={setActiveFolderId}
+      
+      {/* Sidebar - Desktop: always visible, Mobile: overlay */}
+      {currentUser && (
+        <SidebarMenu
           currentUser={currentUser}
           onSignOut={handleSignOut}
+          isVisible={isWideScreen || sidebarVisible}
+          onClose={() => setSidebarVisible(false)}
+          activeScreen="home"
         />
       )}
-      {screen === 'import' && (
-        <ImportScreen
-          preselectedFolderId={activeFolderId || undefined}
-          onProjectCreated={handleProjectCreated}
-          onReview={handleReview}
-          onBack={handleBackToHome}
-        />
-      )}
-      {screen === 'review' && reviewPendingData && (
-        <ReviewScreen
-          pendingData={reviewPendingData}
-          onConfirm={handleReviewConfirm}
-          onRerunAI={handleRerunAI}
-          onBack={handleBack}
-        />
-      )}
-      {screen === 'player' && currentProject && (
-        <PlayerScreen
-          project={currentProject}
-          onBack={handleBackToHome}
-          onOpenReview={handleOpenReviewFromPlayer}
-        />
-      )}
+
+      {/* Main Content */}
+      <View style={[
+        styles.mainContent,
+        currentUser && isWideScreen && { marginLeft: SIDEBAR_WIDTH },
+      ]}>
+        {/* Mobile hamburger button */}
+        {currentUser && !isWideScreen && screen === 'home' && (
+          <TouchableOpacity
+            style={styles.hamburgerBtn}
+            onPress={() => setSidebarVisible(true)}
+          >
+            {Platform.OS === 'web' ? (
+              <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="#c0c0d0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                <line x1="3" y1="6" x2="21" y2="6" />
+                <line x1="3" y1="12" x2="21" y2="12" />
+                <line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
+            ) : (
+              <Text style={{ color: '#c0c0d0', fontSize: 22 }}>☰</Text>
+            )}
+          </TouchableOpacity>
+        )}
+
+        {screen === 'home' && (
+          <HomeScreen
+            projects={projects}
+            onRefresh={handleRefresh}
+            onOpenProject={handleOpenProject}
+            onNewProject={handleNewProject}
+            activeFolderId={activeFolderId}
+            setActiveFolderId={setActiveFolderId}
+            currentUser={currentUser}
+            onSignOut={handleSignOut}
+          />
+        )}
+        {screen === 'import' && (
+          <ImportScreen
+            preselectedFolderId={activeFolderId || undefined}
+            onProjectCreated={handleProjectCreated}
+            onReview={handleReview}
+            onBack={handleBackToHome}
+          />
+        )}
+        {screen === 'review' && reviewPendingData && (
+          <ReviewScreen
+            pendingData={reviewPendingData}
+            onConfirm={handleReviewConfirm}
+            onRerunAI={handleRerunAI}
+            onBack={handleBack}
+          />
+        )}
+        {screen === 'player' && currentProject && (
+          <PlayerScreen
+            project={currentProject}
+            onBack={handleBackToHome}
+            onOpenReview={handleOpenReviewFromPlayer}
+          />
+        )}
+      </View>
     </View>
   );
 }
@@ -816,6 +862,26 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#08080d',
+    flexDirection: 'row',
+  },
+  mainContent: {
+    flex: 1,
+    position: 'relative',
+  },
+  hamburgerBtn: {
+    position: 'absolute',
+    top: Platform.OS === 'web' ? 18 : 50,
+    left: 16,
+    zIndex: 100,
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: 'rgba(20,20,32,0.8)',
+    borderWidth: 1,
+    borderColor: '#1e1e30',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', backdropFilter: 'blur(8px)' } as any : {}),
   },
   loadingContainer: {
     flex: 1,

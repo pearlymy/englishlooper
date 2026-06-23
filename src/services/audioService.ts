@@ -27,6 +27,10 @@ export class AudioService {
   private isWaitingRest: boolean = false;
   private playbackRate: number = 1.0;
   private isTransitioning: boolean = false;
+  // When true, audio plays freely without segment boundary checks
+  private isInBackground: boolean = false;
+  // Track active rest timeout so we can cancel it during transitions
+  private restTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   private onStatusUpdateCallback: ((data: PlaybackCallbackData) => void) | null = null;
 
@@ -88,6 +92,11 @@ export class AudioService {
 
       this.webEngine.setOnPositionUpdate((positionMs, isPlaying) => {
         this.handlePositionUpdate(positionMs, isPlaying);
+      });
+
+      // Listen for background/foreground transitions to avoid sentence-cutting bug
+      this.webEngine.setOnVisibilityChange((isHidden: boolean) => {
+        this.handleVisibilityChange(isHidden);
       });
 
       console.log('[AudioService] Web: Loaded with WebAudioEngine (sample-accurate)');
@@ -175,6 +184,11 @@ export class AudioService {
   }
 
   async unload() {
+    // Cancel any pending rest timeout
+    if (this.restTimeoutId) {
+      clearTimeout(this.restTimeoutId);
+      this.restTimeoutId = null;
+    }
     if (Platform.OS === 'web' && this.webEngine) {
       await this.webEngine.unload();
       this.webEngine = null;
@@ -186,6 +200,8 @@ export class AudioService {
     this.activeSegment = null;
     this.onStatusUpdateCallback = null;
     this.isTransitioning = false;
+    this.isInBackground = false;
+    this.isWaitingRest = false;
   }
 
   getActiveSegment(): Segment | null {
@@ -201,6 +217,15 @@ export class AudioService {
     if (!this.activeSegment || this.isWaitingRest || this.isTransitioning) return;
 
     this.triggerUpdate(positionMs, isPlaying);
+
+    // WAV + background: SKIP segment boundary checks.
+    // Shadow <audio> can't seek accurately on blob WAV (Chrome bug),
+    // so any seek in handleSegmentEnd would land at wrong position,
+    // causing rapid-fire cascading segment jumps.
+    // MP3 in background: loop normally (seeking works fine for MP3).
+    if (this.isInBackground && this.webEngine?.isWavMode) {
+      return;
+    }
 
     // Kiểm tra vượt ranh giới segment
     if (isPlaying && positionMs >= this.activeSegment.endTimeMs) {
@@ -283,10 +308,83 @@ export class AudioService {
     this.isWaitingRest = true;
     this.triggerUpdate(this.activeSegment ? this.activeSegment.startTimeMs : 0, false);
 
-    setTimeout(() => {
+    // Cancel any previous pending rest timeout
+    if (this.restTimeoutId) {
+      clearTimeout(this.restTimeoutId);
+      this.restTimeoutId = null;
+    }
+
+    this.restTimeoutId = setTimeout(() => {
+      this.restTimeoutId = null;
       this.isWaitingRest = false;
       onComplete();
     }, this.restTimeMs);
+  }
+
+  // ─── Background/Foreground transition handling ───
+
+  /**
+   * Handle visibility change from WebAudioEngine.
+   * Loop logic runs NORMALLY in background (via shadow audio timeupdate).
+   * This handler only ensures clean state transitions:
+   * - Going to background: clear any stale transitioning/rest states
+   * - Returning: re-sync active segment if position drifted
+   */
+  private handleVisibilityChange(isHidden: boolean) {
+    if (isHidden) {
+      console.log('[AudioService] Page hidden — loop continues via shadow audio');
+      this.isInBackground = true;
+      // Clear any stuck transitioning state to prevent deadlocks
+      this.isTransitioning = false;
+    } else {
+      console.log('[AudioService] Page visible — re-syncing segment if needed');
+      this.isInBackground = false;
+
+      if (Platform.OS === 'web' && this.webEngine && this.activeSegment) {
+        const currentPos = this.webEngine.getPositionMs();
+        const isPlaying = this.webEngine.isPlaying;
+
+        // Check if position ended up outside the active segment
+        // (can happen if shadow audio seeking was slightly inaccurate)
+        if (currentPos >= this.activeSegment.endTimeMs || currentPos < this.activeSegment.startTimeMs) {
+          // Find the correct segment for current position
+          const matchedSegment = this.findSegmentForPosition(currentPos);
+          if (matchedSegment) {
+            if (matchedSegment.id !== this.activeSegment.id) {
+              console.log(`[AudioService] Re-synced to segment #${matchedSegment.index} (was #${this.activeSegment.index})`);
+              this.activeSegment = matchedSegment;
+              this.loopCount = 0;
+            }
+            // Seek to the start of the matched segment to resume cleanly
+            this.webEngine.seekTo(matchedSegment.startTimeMs);
+            this.triggerUpdate(matchedSegment.startTimeMs, isPlaying);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Find the segment that contains the given position.
+   * Returns the segment if found, or the last segment if position is past all segments.
+   */
+  private findSegmentForPosition(positionMs: number): Segment | null {
+    if (this.segments.length === 0) return null;
+
+    // Find segment that contains this position
+    for (const seg of this.segments) {
+      if (positionMs >= seg.startTimeMs && positionMs < seg.endTimeMs) {
+        return seg;
+      }
+    }
+
+    // Position is past all segments — return the last one
+    if (positionMs >= this.segments[this.segments.length - 1].endTimeMs) {
+      return this.segments[this.segments.length - 1];
+    }
+
+    // Position is before all segments — return the first one
+    return this.segments[0];
   }
 
   getAmplitudeData(numPoints: number): number[] {

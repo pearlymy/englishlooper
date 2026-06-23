@@ -17,6 +17,7 @@ export interface Folder {
   id: string;
   name: string;
   createdAt: number;
+  thumbnailUrl?: string; // base64 data URL for folder card thumbnail
 }
 
 export interface Project {

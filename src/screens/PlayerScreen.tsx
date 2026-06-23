@@ -24,7 +24,8 @@ import { StorageService } from '../services/storageService';
 import { WhisperService } from '../services/whisperService';
 import { AITranslationService } from '../services/aiTranslationService';
 import { FirebaseSyncService } from '../services/firebaseSyncService';
-import { showAlert } from '../utils/alert';
+import { AudioConverter } from '../services/audioConverter';
+import { showAlert, showToast } from '../utils/alert';
 
 interface PlayerScreenProps {
   project: Project;
@@ -443,23 +444,38 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
   };
 
   // --- FILE PICKER: Reload audio from local device ---
-  const handlePickAndReloadAudio = async (fileUri: string, fileBlob?: Blob) => {
+  const handlePickAndReloadAudio = async (fileUri: string, fileBlob?: Blob, fileName?: string) => {
     setIsReloadingAudio(true);
     try {
+      let finalUri = fileUri;
+      let finalBlob = fileBlob;
+
+      // Auto-convert WAV to MP3 on web (fixes Chrome blob seeking bug)
+      if (Platform.OS === 'web' && fileName && AudioConverter.needsConversion(fileName)) {
+        try {
+          const { blob, blobUrl } = await AudioConverter.convertToMp3(fileUri);
+          finalUri = blobUrl;
+          finalBlob = blob;
+          console.log(`[PlayerScreen] Converted ${fileName} to MP3`);
+        } catch (err) {
+          console.warn('[PlayerScreen] Conversion failed, using original:', err);
+        }
+      }
+
       // 1. Save file locally
-      if (Platform.OS === 'web' && fileBlob) {
-        await DBService.saveAudio(project.id, fileBlob);
+      if (Platform.OS === 'web' && finalBlob) {
+        await DBService.saveAudio(project.id, finalBlob);
       } else if (Platform.OS !== 'web') {
         const FS = require('expo-file-system/legacy');
         const localPath = `${FS.documentDirectory}${project.id}.mp3`;
-        await FS.copyAsync({ from: fileUri, to: localPath });
-        fileUri = localPath;
+        await FS.copyAsync({ from: finalUri, to: localPath });
+        finalUri = localPath;
       }
 
       // 2. Resolve new URI
-      let newUri = fileUri;
-      if (Platform.OS === 'web' && fileBlob) {
-        newUri = URL.createObjectURL(fileBlob);
+      let newUri = finalUri;
+      if (Platform.OS === 'web' && finalBlob && !newUri.startsWith('blob:')) {
+        newUri = URL.createObjectURL(finalBlob);
       }
 
       // 3. Unload old audio & reload
@@ -490,6 +506,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
 
       setAudioLoadFailed(false);
       setShowFilePickerModal(false);
+      showToast('✅ Đã nạp file âm thanh mới');
     } catch (err: any) {
       console.error('[PlayerScreen] Reload audio failed:', err);
       showAlert('Lỗi', `Không thể nạp tệp âm thanh đã chọn.\n${err.message || err}`);
@@ -589,7 +606,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     input.onchange = (e: any) => {
       const file = e.target?.files?.[0];
       if (file) {
-        handlePickAndReloadAudio(URL.createObjectURL(file), file);
+        handlePickAndReloadAudio(URL.createObjectURL(file), file, file.name);
       }
     };
     input.click();

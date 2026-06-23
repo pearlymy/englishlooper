@@ -21,6 +21,7 @@ import { WhisperService } from '../services/whisperService';
 import { AITranslationService } from '../services/aiTranslationService';
 import { DBService } from '../services/dbService';
 import { FirebaseSyncService } from '../services/firebaseSyncService';
+import { AudioConverter } from '../services/audioConverter';
 import { showAlert } from '../utils/alert';
 
 export interface ReviewPendingData {
@@ -44,7 +45,7 @@ interface ImportScreenProps {
 
 export default function ImportScreen({ preselectedFolderId, onProjectCreated, onReview, onBack }: ImportScreenProps) {
   const [title, setTitle] = useState('');
-  const [audioFile, setAudioFile] = useState<{ uri: string; name: string; size?: number } | null>(null);
+  const [audioFile, setAudioFile] = useState<{ uri: string; name: string; size?: number; convertedBlob?: Blob } | null>(null);
   const [audioDurationMs, setAudioDurationMs] = useState<number>(0);
   const [transcript, setTranscript] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -116,7 +117,7 @@ export default function ImportScreen({ preselectedFolderId, onProjectCreated, on
     }
   };
 
-  // Chọn tệp MP3 native từ điện thoại
+  // Chọn tệp audio từ thiết bị
   const handleSelectAudio = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -126,23 +127,49 @@ export default function ImportScreen({ preselectedFolderId, onProjectCreated, on
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
         const asset = result.assets[0];
+        let fileUri = asset.uri;
+        let fileName = asset.name;
+        let fileSize = asset.size;
+        let convertedBlob: Blob | undefined;
+
+        // Auto-convert WAV/FLAC to MP3 on web (fixes Chrome blob seeking bug)
+        if (AudioConverter.needsConversion(asset.name)) {
+          setLoadingText('🔄 Đang chuyển đổi sang MP3...');
+          setIsLoading(true);
+          try {
+            const { blob, blobUrl } = await AudioConverter.convertToMp3(
+              asset.uri,
+              (msg) => setLoadingText(msg)
+            );
+            fileUri = blobUrl;
+            fileName = asset.name.replace(/\.[^/.]+$/, '.mp3');
+            fileSize = blob.size;
+            convertedBlob = blob;
+          } catch (err) {
+            console.warn('[ImportScreen] Conversion failed, using original:', err);
+            // Fall through — use original file
+          }
+          setIsLoading(false);
+          setLoadingText('');
+        }
+
         setAudioFile({
-          uri: asset.uri,
-          name: asset.name,
-          size: asset.size
+          uri: fileUri,
+          name: fileName,
+          size: fileSize,
+          convertedBlob,
         });
         if (!title) {
-          setTitle(asset.name.replace(/\.[^/.]+$/, ""));
+          setTitle(asset.name.replace(/\.[^/.]+$/, ''));
         }
 
         // Đọc thời lượng thật từ metadata
         setLoadingText('Đang đọc metadata...');
         setIsLoading(true);
         try {
-          const duration = await AudioService.getAudioDuration(asset.uri);
+          const duration = await AudioService.getAudioDuration(fileUri);
           setAudioDurationMs(duration);
         } catch {
-          // Fallback nếu không đọc được
           setAudioDurationMs(0);
         }
         setIsLoading(false);
@@ -224,6 +251,7 @@ export default function ImportScreen({ preselectedFolderId, onProjectCreated, on
       onReview({
         title: title.trim() || 'Untitled Project',
         audioUri: audioFile.uri,
+        audioBlobForWeb: audioFile.convertedBlob,
         durationMs: finalDuration,
         segments: finalSegments,
         transcriptText: transcript.trim() || undefined,

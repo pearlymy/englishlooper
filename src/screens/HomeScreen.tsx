@@ -12,10 +12,12 @@ import {
   TextInput,
   Modal,
   ScrollView,
+  Image,
 } from 'react-native';
 import { Project, Folder } from '../types';
 import { StorageService } from '../services/storageService';
-import { auth } from '../services/firebaseConfig';
+import { auth, storage } from '../services/firebaseConfig';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { FirebaseSyncService } from '../services/firebaseSyncService';
 import { showAlert } from '../utils/alert';
@@ -79,6 +81,54 @@ export default function HomeScreen({
   const [newFolderName, setNewFolderName] = useState('');
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [isSubmittingFolder, setIsSubmittingFolder] = useState(false);
+  const [folderThumbnail, setFolderThumbnail] = useState<string | null>(null);
+
+  // Web file picker for folder thumbnail
+  const pickFolderThumbnail = () => {
+    if (Platform.OS !== 'web') return;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = (e: any) => {
+      const file = e.target?.files?.[0];
+      if (!file) return;
+      // Always resize for preview + upload (max 800px, JPEG 80%)
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const img = new (window as any).Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const maxSize = 800;
+          let w = img.width;
+          let h = img.height;
+          if (w > maxSize || h > maxSize) {
+            if (w > h) { h = (h / w) * maxSize; w = maxSize; }
+            else { w = (w / h) * maxSize; h = maxSize; }
+          }
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d')!;
+          ctx.drawImage(img, 0, 0, w, h);
+          setFolderThumbnail(canvas.toDataURL('image/jpeg', 0.8));
+        };
+        img.src = ev.target?.result;
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  };
+
+  // Upload thumbnail to Firebase Storage, returns download URL
+  const uploadThumbnailToStorage = async (folderId: string, base64Data: string): Promise<string> => {
+    // Convert base64 to blob
+    const response = await fetch(base64Data);
+    const blob = await response.blob();
+    
+    const userId = auth.currentUser?.uid || 'anonymous';
+    const storageRef = ref(storage, `folder-thumbnails/${userId}/${folderId}.jpg`);
+    await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
+    return await getDownloadURL(storageRef);
+  };
 
   // Auth Modal states
   const [isAuthModalVisible, setIsAuthModalVisible] = useState(false);
@@ -87,9 +137,19 @@ export default function HomeScreen({
   const [authError, setAuthError] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
 
+  // Custom confirm dialog state (replaces browser native alert)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    confirmText: string;
+    confirmColor?: string;
+    onConfirm: () => void;
+  } | null>(null);
+
   const handleOpenCreateFolderModal = () => {
     setEditingFolderId(null);
     setNewFolderName('');
+    setFolderThumbnail(null);
     setIsCreateModalVisible(true);
   };
 
@@ -97,6 +157,7 @@ export default function HomeScreen({
     setIsCreateModalVisible(false);
     setEditingFolderId(null);
     setNewFolderName('');
+    setFolderThumbnail(null);
   };
 
   const handleOpenAuthModal = () => {
@@ -220,6 +281,33 @@ export default function HomeScreen({
     return () => sub?.remove();
   }, [loadFolders, projects, currentUser]);
 
+  // Inject CSS hover effects for folder cards on web
+  React.useEffect(() => {
+    if (!IS_WEB) return;
+    const styleId = 'folder-card-hover-styles';
+    if (document.getElementById(styleId)) return;
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = `
+      .folder-grid-card {
+        transition: all 0.2s ease, transform 0.15s ease;
+      }
+      .folder-grid-card:hover {
+        transform: translateY(-3px) !important;
+        border-color: #2a2a44 !important;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.35) !important;
+      }
+      .folder-grid-card .folder-actions {
+        opacity: 0;
+        transition: opacity 0.2s ease;
+      }
+      .folder-grid-card:hover .folder-actions {
+        opacity: 1 !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }, []);
+
   const isWide = dimensions.width > 768;
   const numColumns = isWide ? (dimensions.width > 1200 ? 3 : 2) : 1;
   const folderCardMaxWidth = isWide ? (numColumns === 3 ? '31.5%' : '48%') : '100%';
@@ -244,22 +332,18 @@ export default function HomeScreen({
   }, [onRefresh, loadFolders, currentUser]);
 
   const handleDelete = (project: Project) => {
-    showAlert(
-      'Xóa bài học',
-      `Bạn chắc chắn muốn xóa "${project.title}"?`,
-      [
-        { text: 'Hủy', style: 'cancel' },
-        {
-          text: 'Xóa',
-          style: 'destructive',
-          onPress: async () => {
-            await StorageService.deleteProject(project.id);
-            await FirebaseSyncService.deleteProject(project.id);
-            onRefresh();
-          }
-        }
-      ]
-    );
+    setConfirmDialog({
+      title: 'Xóa bài học',
+      message: `Bạn chắc chắn muốn xóa "${project.title}"?`,
+      confirmText: 'Xóa',
+      confirmColor: '#ef4444',
+      onConfirm: async () => {
+        await StorageService.deleteProject(project.id);
+        await FirebaseSyncService.deleteProject(project.id);
+        onRefresh();
+        setConfirmDialog(null);
+      },
+    });
   };
 
   const handleCreateFolder = async () => {
@@ -274,26 +358,38 @@ export default function HomeScreen({
     
     try {
       if (editingFolderId) {
-        // Đổi tên thư mục đang có
         const folderToUpdate = folders.find(f => f.id === editingFolderId);
         if (folderToUpdate) {
-          const updatedFolder = { ...folderToUpdate, name };
+          let thumbnailUrl = folderToUpdate.thumbnailUrl;
+          // Upload new thumbnail to Firebase Storage if changed (base64 = new image)
+          if (folderThumbnail && folderThumbnail.startsWith('data:')) {
+            thumbnailUrl = await uploadThumbnailToStorage(editingFolderId, folderThumbnail);
+          } else if (folderThumbnail === null && folderToUpdate.thumbnailUrl) {
+            thumbnailUrl = undefined; // User removed thumbnail
+          }
+          const updatedFolder = { ...folderToUpdate, name, thumbnailUrl };
           await StorageService.saveFolder(updatedFolder);
           await FirebaseSyncService.uploadFolder(updatedFolder);
         }
         setEditingFolderId(null);
       } else {
-        // Tạo thư mục mới
+        const folderId = `fold_${Date.now()}`;
+        let thumbnailUrl: string | undefined;
+        if (folderThumbnail && folderThumbnail.startsWith('data:')) {
+          thumbnailUrl = await uploadThumbnailToStorage(folderId, folderThumbnail);
+        }
         const newFolder: Folder = {
-          id: `fold_${Date.now()}`,
+          id: folderId,
           name,
           createdAt: Date.now(),
+          ...(thumbnailUrl ? { thumbnailUrl } : {}),
         };
         await StorageService.saveFolder(newFolder);
         await FirebaseSyncService.uploadFolder(newFolder);
       }
       
       setNewFolderName('');
+      setFolderThumbnail(null);
       setIsCreateModalVisible(false);
       await loadFolders();
     } catch (err) {
@@ -305,27 +401,23 @@ export default function HomeScreen({
   };
 
   const handleDeleteFolder = (folder: Folder) => {
-    showAlert(
-      'Xóa thư mục',
-      `Bạn chắc chắn muốn xóa thư mục "${folder.name}"? Hành động này sẽ xóa tất cả các bài học bên trong thư mục này.`,
-      [
-        { text: 'Hủy', style: 'cancel' },
-        {
-          text: 'Xóa toàn bộ',
-          style: 'destructive',
-          onPress: async () => {
-            await StorageService.deleteFolder(folder.id);
-            await FirebaseSyncService.deleteFolder(folder.id);
-            const folderProjects = projects.filter(p => p.folderId === folder.id);
-            for (const p of folderProjects) {
-              await FirebaseSyncService.deleteProject(p.id);
-            }
-            await loadFolders();
-            onRefresh();
-          }
+    setConfirmDialog({
+      title: 'Xóa thư mục',
+      message: `Bạn chắc chắn muốn xóa thư mục "${folder.name}"? Hành động này sẽ xóa tất cả các bài học bên trong thư mục này.`,
+      confirmText: 'Xóa toàn bộ',
+      confirmColor: '#ef4444',
+      onConfirm: async () => {
+        await StorageService.deleteFolder(folder.id);
+        await FirebaseSyncService.deleteFolder(folder.id);
+        const folderProjects = projects.filter(p => p.folderId === folder.id);
+        for (const p of folderProjects) {
+          await FirebaseSyncService.deleteProject(p.id);
         }
-      ]
-    );
+        await loadFolders();
+        onRefresh();
+        setConfirmDialog(null);
+      },
+    });
   };
 
   const getListeningProgress = (p: Project) => {
@@ -555,7 +647,19 @@ export default function HomeScreen({
     );
   };
 
-  const renderFolderCard = ({ item }: { item: Folder | { id: string; name: string; isVirtual?: boolean } }) => {
+  // Gradient colors for folder thumbnails
+  const folderGradients = [
+    ['#2d1b69', '#1a1145', '#7c3aed'],
+    ['#1b3a69', '#112045', '#3b82f6'],
+    ['#1b6945', '#114530', '#10b981'],
+    ['#69451b', '#453011', '#f59e0b'],
+    ['#691b3a', '#451130', '#ec4899'],
+    ['#1b6969', '#114545', '#06b6d4'],
+    ['#4a1b69', '#301145', '#a855f7'],
+    ['#691b1b', '#451111', '#ef4444'],
+  ];
+
+  const renderFolderCard = ({ item, index }: { item: Folder | { id: string; name: string; isVirtual?: boolean }; index: number }) => {
     const isVirtual = item.id === 'uncategorized';
     const count = isVirtual
       ? projects.filter(p => !p.folderId).length
@@ -579,95 +683,116 @@ export default function HomeScreen({
       folderPct = totalSegments > 0 ? Math.round((learnedSegments / totalSegments) * 100) : 0;
     }
 
-    // Color based on progress and mode
     const accentColor = progressMode === 'dictation'
       ? (folderPct >= 100 ? '#10b981' : folderPct > 0 ? '#22c55e' : '#4b5563')
       : progressMode === 'translation'
       ? (folderPct >= 100 ? '#10b981' : folderPct > 0 ? '#0d9488' : '#4b5563')
       : (folderPct >= 100 ? '#10b981' : folderPct > 0 ? '#a78bfa' : '#7c3aed');
 
+    const gradientIdx = (index || 0) % folderGradients.length;
+    const [gradStart, gradEnd, gradAccent] = folderGradients[gradientIdx];
+
+    const folderNumColumns = isWide ? (dimensions.width > 1200 ? 5 : dimensions.width > 900 ? 4 : 3) : 2;
+    const cardWidth = isWide 
+      ? `${(100 / folderNumColumns) - 1.5}%` 
+      : `${(100 / 2) - 2}%`;
+
+
+
     return (
+      <View
+        key={item.id}
+        ref={(ref: any) => {
+          if (IS_WEB && ref) {
+            // Add class directly to DOM
+            const el = ref as any;
+            if (el.classList && !el.classList.contains('folder-grid-card')) {
+              el.classList.add('folder-grid-card');
+            }
+          }
+        }}
+        style={[styles.folderCard, { width: cardWidth as any }]}
+      >
       <TouchableOpacity
-        style={styles.folderCard}
+        style={{ flex: 1 }}
         activeOpacity={0.7}
         onPress={() => setActiveFolderId(item.id)}
       >
-        {/* Left: Circle icon */}
-        <View style={[styles.folderIconCircle, { borderColor: accentColor + '40', backgroundColor: accentColor + '12' }]}>
-          {IS_WEB ? (
-            <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke={accentColor} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            </svg>
-          ) : (
-            <Text style={{ fontSize: 18, color: accentColor }}>📂</Text>
+        {/* Thumbnail */}
+        <View style={[styles.folderThumb, IS_WEB ? { background: `linear-gradient(135deg, ${gradStart} 0%, ${gradEnd} 100%)` } as any : { backgroundColor: gradStart }]}>
+          {/* Show uploaded thumbnail image if available */}
+          {(item as Folder).thumbnailUrl && (
+            <Image
+              source={{ uri: (item as Folder).thumbnailUrl }}
+              style={[StyleSheet.absoluteFillObject, { borderTopLeftRadius: 13, borderTopRightRadius: 13 }]}
+              resizeMode="contain"
+            />
           )}
-        </View>
-
-        {/* Center: Info */}
-        <View style={styles.folderInfo}>
-          <Text style={styles.folderName} numberOfLines={1}>{item.name}</Text>
-          <View style={styles.folderMetaRow}>
-            <Text style={styles.folderCount}>{count} bài học</Text>
-            {folderPct > 0 && (
-              <>
-                <Text style={styles.folderMetaDot}>·</Text>
-                <Text style={[styles.folderCount, { color: accentColor }]}>{folderPct}%</Text>
-              </>
-            )}
+          {/* Folder icon + title overlay (only when no thumbnail) */}
+          {!(item as Folder).thumbnailUrl && (
+          <View style={styles.folderThumbTitleWrap}>
+            <Text style={[styles.folderThumbTitle, !isWide && { fontSize: 14 }]} numberOfLines={2}>{item.name}</Text>
           </View>
-          {/* Progress bar */}
-          {count > 0 && (
-            <View style={styles.folderProgressTrack}>
-              <View style={[styles.folderProgressFill, { width: `${Math.max(folderPct, 2)}%` as any, backgroundColor: accentColor }]} />
+          )}
+
+          {/* Count badge */}
+          <View style={styles.folderThumbBadge}>
+            <Text style={styles.folderThumbBadgeText}>{count} bài</Text>
+          </View>
+
+          {/* Progress badge */}
+          {folderPct > 0 && (
+            <View style={[styles.folderThumbProgress, { backgroundColor: accentColor + '30', borderColor: accentColor + '50' }]}>
+              <Text style={[styles.folderThumbProgressText, { color: accentColor }]}>{folderPct}%</Text>
             </View>
           )}
-        </View>
 
-        {/* Right: Actions */}
-        <View style={styles.folderActionsRow}>
-          {!isVirtual && (
-            <>
+          {/* Hover actions - desktop only (no hover on mobile) */}
+          {!isVirtual && IS_WEB && isWide && (
+            <View
+              ref={(ref: any) => {
+                if (ref && ref.classList && !ref.classList.contains('folder-actions')) {
+                  ref.classList.add('folder-actions');
+                }
+              }}
+              style={styles.folderThumbActions}
+            >
               <TouchableOpacity
-                style={styles.folderActionBtn}
+                style={styles.folderThumbActionBtn}
                 onPress={(e) => {
                   if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
                   setEditingFolderId(item.id);
                   setNewFolderName(item.name);
+                  setFolderThumbnail((item as any).thumbnailUrl || null);
                   setIsCreateModalVisible(true);
                 }}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
               >
-                <EditIcon color="#3a3a5a" size={13} />
+                <EditIcon color="#ccc" size={11} />
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.folderActionBtn}
+                style={styles.folderThumbActionBtn}
                 onPress={(e) => {
                   if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
                   handleDeleteFolder(item as Folder);
                 }}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
               >
-                {IS_WEB ? (
-                  <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#3a3a5a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
-                    <polyline points="3 6 5 6 21 6" />
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                  </svg>
-                ) : (
-                  <Text style={{ color: '#3a3a5a', fontSize: 12 }}>🗑</Text>
-                )}
+                <svg width={11} height={11} viewBox="0 0 24 24" fill="none" stroke="#ccc" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
               </TouchableOpacity>
-            </>
-          )}
-          {/* Chevron */}
-          {IS_WEB ? (
-            <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="#2a2a4a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
-              <polyline points="9 18 15 12 9 6" />
-            </svg>
-          ) : (
-            <Text style={{ color: '#2a2a4a', fontSize: 18, fontWeight: '300' }}>›</Text>
+            </View>
           )}
         </View>
+
+        {/* Title & Meta */}
+        <View style={[styles.folderCardBody, !isWide && { padding: 8 }]}>
+          <Text style={[styles.folderName, !isWide && { fontSize: 12 }]} numberOfLines={1}>{item.name}</Text>
+        </View>
       </TouchableOpacity>
+      </View>
     );
   };
 
@@ -761,6 +886,7 @@ export default function HomeScreen({
                       if (folder) {
                         setEditingFolderId(folder.id);
                         setNewFolderName(folder.name);
+                        setFolderThumbnail(folder.thumbnailUrl || null);
                         setIsCreateModalVisible(true);
                       }
                     }}
@@ -786,19 +912,6 @@ export default function HomeScreen({
         )}
 
         <View style={styles.headerRightRow}>
-          <TouchableOpacity
-            style={[
-              styles.headerUserBtn,
-              currentUser && styles.headerUserBtnLoggedIn,
-            ]}
-            onPress={handleOpenAuthModal}
-          >
-            <AccountIcon isLoggedIn={!!currentUser} size={isWide ? 26 : 24} />
-            {currentUser && (
-              <View style={styles.headerUserOnlineDot} />
-            )}
-          </TouchableOpacity>
-
           {isWide && (
             activeFolderId !== null ? (
               <TouchableOpacity
@@ -871,23 +984,43 @@ export default function HomeScreen({
       )}
 
       {/* List */}
-      <FlatList
-        key={'list_1'}
-        data={(activeFolderId !== null ? filteredProjects : folderListData) as any}
-        keyExtractor={(item: any) => item.id}
-        renderItem={activeFolderId !== null ? renderCard : (renderFolderCard as any)}
-        numColumns={1}
-        ListEmptyComponent={activeFolderId !== null ? renderEmptyFolder : renderEmptyFolders}
-        contentContainerStyle={
-          (activeFolderId !== null ? filteredProjects.length : folderListData.length) === 0
-            ? styles.emptyContainer
-            : [styles.listContent, isWide && styles.listContentWide]
-        }
-        showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#a855f7" colors={['#a855f7']} />
-        }
-      />
+      {activeFolderId !== null ? (
+        <FlatList
+          key={'list_projects'}
+          data={filteredProjects}
+          keyExtractor={(item: any) => item.id}
+          renderItem={renderCard}
+          numColumns={1}
+          ListEmptyComponent={renderEmptyFolder}
+          contentContainerStyle={
+            filteredProjects.length === 0
+              ? styles.emptyContainer
+              : [styles.listContent, isWide && styles.listContentWide]
+          }
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#a855f7" colors={['#a855f7']} />
+          }
+        />
+      ) : (
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={
+            folderListData.length === 0
+              ? styles.emptyContainer
+              : [styles.listContent, isWide && styles.listContentWide]
+          }
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#a855f7" colors={['#a855f7']} />
+          }
+        >
+          {folderListData.length === 0 ? renderEmptyFolders() : (
+            <View style={styles.folderGrid}>
+              {folderListData.map((item, index) => renderFolderCard({ item, index } as any))}
+            </View>
+          )}
+        </ScrollView>
+      )}
 
       {/* FAB (mobile) */}
       {!isWide && (
@@ -917,8 +1050,50 @@ export default function HomeScreen({
           <TouchableOpacity style={styles.modalDismiss} onPress={handleCloseCreateFolderModal} />
           <View style={styles.modalSheet}>
             <Text style={styles.modalTitle}>
-              {editingFolderId ? '📁 Đổi Tên Thư Mục' : '📁 Tạo Thư Mục Mới'}
+              {editingFolderId ? '📁 Chỉnh Sửa Thư Mục' : '📁 Tạo Thư Mục Mới'}
             </Text>
+
+            {/* Thumbnail Picker */}
+            <Text style={styles.thumbPickerLabel}>Ảnh bìa</Text>
+            <TouchableOpacity
+              style={styles.thumbPickerContainer}
+              onPress={pickFolderThumbnail}
+              activeOpacity={0.7}
+            >
+              {folderThumbnail ? (
+                <View style={styles.thumbPreviewWrap}>
+                  <Image
+                    source={{ uri: folderThumbnail }}
+                    style={styles.thumbPreview}
+                    resizeMode="contain"
+                  />
+                  <TouchableOpacity
+                    style={styles.thumbRemoveBtn}
+                    onPress={(e) => {
+                      if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+                      setFolderThumbnail(null);
+                    }}
+                  >
+                    <Text style={styles.thumbRemoveText}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.thumbPlaceholder}>
+                  {IS_WEB ? (
+                    <svg width={28} height={28} viewBox="0 0 24 24" fill="none" stroke="#5a5a7a" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                      <circle cx="8.5" cy="8.5" r="1.5" />
+                      <polyline points="21 15 16 10 5 21" />
+                    </svg>
+                  ) : (
+                    <Text style={{ fontSize: 24 }}>🖼</Text>
+                  )}
+                  <Text style={styles.thumbPlaceholderText}>Chọn ảnh bìa</Text>
+                  <Text style={styles.thumbPlaceholderSub}>JPG, PNG — tối đa 500KB</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+
             <TextInput
               style={styles.modalInput}
               placeholder="Nhập tên thư mục..."
@@ -937,7 +1112,7 @@ export default function HomeScreen({
                 disabled={isSubmittingFolder}
               >
                 <Text style={styles.modalConfirmBtnText}>
-                  {isSubmittingFolder ? 'Đang tạo...' : (editingFolderId ? 'Lưu' : 'Tạo')}
+                  {isSubmittingFolder ? 'Đang lưu...' : (editingFolderId ? 'Lưu' : 'Tạo')}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -1034,6 +1209,48 @@ export default function HomeScreen({
                 </TouchableOpacity>
               )}
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Custom Confirm Dialog */}
+      <Modal
+        visible={!!confirmDialog}
+        transparent
+        animationType={isWide ? 'fade' : 'slide'}
+        onRequestClose={() => setConfirmDialog(null)}
+      >
+        <View style={[styles.modalOverlay, !isWide && styles.confirmOverlayMobile]}>
+          <TouchableOpacity style={styles.modalDismiss} onPress={() => setConfirmDialog(null)} />
+          <View style={[styles.confirmSheet, !isWide && styles.confirmSheetMobile]}>
+            {/* Warning icon */}
+            <View style={styles.confirmIconWrap}>
+              {IS_WEB ? (
+                <svg width={32} height={32} viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              ) : (
+                <Text style={{ fontSize: 28 }}>⚠️</Text>
+              )}
+            </View>
+            <Text style={styles.confirmTitle}>{confirmDialog?.title}</Text>
+            <Text style={styles.confirmMessage}>{confirmDialog?.message}</Text>
+            <View style={styles.confirmActions}>
+              <TouchableOpacity
+                style={styles.confirmCancelBtn}
+                onPress={() => setConfirmDialog(null)}
+              >
+                <Text style={styles.confirmCancelText}>Hủy</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.confirmDeleteBtn, confirmDialog?.confirmColor ? { backgroundColor: confirmDialog.confirmColor } : {}]}
+                onPress={confirmDialog?.onConfirm}
+              >
+                <Text style={styles.confirmDeleteText}>{confirmDialog?.confirmText || 'Xác nhận'}</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1438,84 +1655,121 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     marginTop: -1,
   },
-  folderCard: {
+  folderGrid: {
     flexDirection: 'row',
-    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 10,
+    paddingHorizontal: 4,
+  },
+  folderCard: {
     backgroundColor: '#0c0c18',
     borderWidth: 1,
     borderColor: '#16162a',
-    borderRadius: 16,
-    marginBottom: 12,
-    padding: 16,
-    gap: 14,
+    borderRadius: 14,
+    overflow: 'hidden',
     ...(IS_WEB ? {
       cursor: 'pointer',
-      transition: 'all 0.2s ease',
-      maxWidth: 820,
-      alignSelf: 'center',
-      width: '100%',
+      transition: 'all 0.2s ease, transform 0.15s ease',
     } as any : {}),
   },
-  folderIconCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    borderWidth: 1,
-    alignItems: 'center',
+  folderThumb: {
+    width: '100%',
+    aspectRatio: 16 / 9,
+    borderTopLeftRadius: 13,
+    borderTopRightRadius: 13,
     justifyContent: 'center',
-    flexShrink: 0,
-  },
-  folderInfo: {
-    flex: 1,
-    minWidth: 0,
-    gap: 4,
-  },
-  folderMetaRow: {
-    flexDirection: 'row',
     alignItems: 'center',
-  },
-  folderMetaDot: {
-    color: '#2a2a3a',
-    marginHorizontal: 6,
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  folderProgressTrack: {
-    height: 3,
-    backgroundColor: '#16162a',
-    borderRadius: 2,
-    marginTop: 6,
+    position: 'relative',
     overflow: 'hidden',
   },
-  folderProgressFill: {
-    height: 3,
-    borderRadius: 2,
+  folderThumbIconWrap: {
+    position: 'absolute',
+    right: 12,
+    bottom: 10,
+    opacity: 0.6,
   },
-  folderActionsRow: {
-    flexDirection: 'row',
+  folderThumbTitleWrap: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 4,
-    flexShrink: 0,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
   },
-  folderActionBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+  folderThumbTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.9)',
+    textAlign: 'center',
+    textShadowColor: 'rgba(0,0,0,0.3)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  folderThumbBadge: {
+    position: 'absolute',
+    left: 10,
+    bottom: 8,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    ...(IS_WEB ? { backdropFilter: 'blur(6px)' } as any : {}),
+  },
+  folderThumbBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#e0e0f0',
+  },
+  folderThumbProgress: {
+    position: 'absolute',
+    left: 10,
+    top: 8,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+  },
+  folderThumbProgressText: {
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  folderThumbActions: {
+    position: 'absolute',
+    right: 6,
+    top: 6,
+    flexDirection: 'row',
+    gap: 4,
+    opacity: 0,
+    ...(IS_WEB ? { transition: 'opacity 0.2s ease' } as any : {}),
+  },
+  folderThumbActionBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(0,0,0,0.6)',
     alignItems: 'center',
     justifyContent: 'center',
-    opacity: 0.4,
-    ...(IS_WEB ? { cursor: 'pointer' } as any : {}),
+    ...(IS_WEB ? { cursor: 'pointer', backdropFilter: 'blur(4px)' } as any : {}),
+  },
+  folderCardBody: {
+    padding: 12,
+    paddingTop: 10,
+    gap: 3,
   },
   folderName: {
-    fontSize: 15,
+    fontSize: 13.5,
     fontWeight: '700',
     color: '#e8e8f0',
     letterSpacing: -0.2,
+    lineHeight: 18,
   },
   folderCount: {
-    fontSize: 12,
-    color: '#4a4a6a',
-    fontWeight: '600',
+    fontSize: 11.5,
+    color: '#5a5a7a',
+    fontWeight: '500',
   },
   headerEditFolderBtn: {
     padding: 4,
@@ -1714,5 +1968,150 @@ const styles = StyleSheet.create({
   },
   syncToastTextError: {
     color: '#fca5a5',
+  },
+
+  // Thumbnail picker styles
+  thumbPickerLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#8b8ba8',
+    marginBottom: 8,
+    marginTop: 4,
+  },
+  thumbPickerContainer: {
+    marginBottom: 16,
+    borderRadius: 12,
+    overflow: 'hidden',
+    ...(IS_WEB ? { cursor: 'pointer' } as any : {}),
+  },
+  thumbPreviewWrap: {
+    position: 'relative',
+    width: '100%',
+    aspectRatio: 16 / 9,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  thumbPreview: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 12,
+  },
+  thumbRemoveBtn: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...(IS_WEB ? { cursor: 'pointer', backdropFilter: 'blur(4px)' } as any : {}),
+  },
+  thumbRemoveText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  thumbPlaceholder: {
+    width: '100%',
+    aspectRatio: 16 / 9,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#2a2a44',
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(20,20,32,0.5)',
+    gap: 6,
+  },
+  thumbPlaceholderText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#6b7280',
+    marginTop: 4,
+  },
+  thumbPlaceholderSub: {
+    fontSize: 11,
+    color: '#4a4a6a',
+  },
+
+  // Confirm dialog styles
+  confirmOverlayMobile: {
+    justifyContent: 'flex-end',
+  },
+  confirmSheet: {
+    backgroundColor: '#1a1a2e',
+    borderRadius: 20,
+    padding: 28,
+    width: '90%',
+    maxWidth: 420,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+    ...(IS_WEB ? { boxShadow: '0 16px 48px rgba(0,0,0,0.5)' } as any : {}),
+  },
+  confirmSheetMobile: {
+    width: '100%',
+    maxWidth: '100%',
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingBottom: 36,
+  },
+  confirmIconWrap: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  confirmTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#f0f0f0',
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  confirmMessage: {
+    fontSize: 14,
+    color: '#8b8ba8',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  confirmActions: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  confirmCancelBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  confirmCancelText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#a0a0b8',
+  },
+  confirmDeleteBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: '#ef4444',
+    alignItems: 'center',
+  },
+  confirmDeleteText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fff',
   },
 });

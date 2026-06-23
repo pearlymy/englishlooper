@@ -6,6 +6,7 @@ import { StorageService } from './storageService';
 import { DBService } from './dbService';
 import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
+import { AudioConverter } from './audioConverter';
 
 export class FirebaseSyncService {
   // Check if user is logged in
@@ -265,6 +266,55 @@ export class FirebaseSyncService {
 
   // --- LAZY AUDIO RESOLVER ---
 
+  /**
+   * Check if a blob is non-standard WAV and re-encode to standard PCM WAV.
+   * Saves converted blob back to IndexedDB so conversion only happens once.
+   */
+  private static async ensureCleanAudio(projectId: string, blob: Blob): Promise<Blob> {
+    if (Platform.OS !== 'web') return blob;
+
+    // Skip if already MP3 (by MIME type or magic bytes)
+    if (blob.type === 'audio/mpeg' || blob.type === 'audio/mp3') return blob;
+    // Check MP3 magic bytes for blobs with empty MIME type
+    try {
+      const head = new Uint8Array(await blob.slice(0, 3).arrayBuffer());
+      const isId3 = head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33; // ID3
+      const isMpSync = head[0] === 0xFF && (head[1] & 0xE0) === 0xE0; // MP3 sync
+      if (isId3 || isMpSync) return blob;
+    } catch {}
+
+    // Check magic bytes for WAV (RIFF...WAVE)
+    const isWav = await AudioConverter.isWavBlob(blob);
+    if (!isWav) return blob;
+
+    // Check if it's already a clean standard WAV (header exactly 44 bytes, fmt chunk = 16)
+    try {
+      const headerBuf = new Uint8Array(await blob.slice(0, 44).arrayBuffer());
+      const fmtChunkSize = headerBuf[16] | (headerBuf[17] << 8) | (headerBuf[18] << 16) | (headerBuf[19] << 24);
+      const audioFormat = headerBuf[20] | (headerBuf[21] << 8);
+      // Standard PCM WAV has fmt chunk size = 16 and audio format = 1
+      if (fmtChunkSize === 16 && audioFormat === 1 && blob.type === 'audio/wav') {
+        console.log(`[FirebaseSyncService] Blob for ${projectId} is already clean standard WAV`);
+        return blob;
+      }
+    } catch {}
+
+    console.log(`[FirebaseSyncService] Detected non-standard WAV for project ${projectId}, re-encoding...`);
+    try {
+      const tempUrl = URL.createObjectURL(blob);
+      const { blob: cleanBlob } = await AudioConverter.convertToMp3(tempUrl);
+      URL.revokeObjectURL(tempUrl);
+
+      // Save re-encoded blob back to IndexedDB (one-time conversion)
+      await DBService.saveAudio(projectId, cleanBlob);
+      console.log(`[FirebaseSyncService] Re-encoded & saved for project ${projectId} (${(blob.size/1024/1024).toFixed(1)}MB → ${(cleanBlob.size/1024/1024).toFixed(1)}MB)`);
+      return cleanBlob;
+    } catch (err) {
+      console.warn(`[FirebaseSyncService] Re-encoding failed for ${projectId}:`, err);
+      return blob;
+    }
+  }
+
   static async resolveAndDownloadAudio(projectId: string, currentUri: string): Promise<string> {
     const uid = this.getUserId();
     const isOnline = uid && this.isOnline();
@@ -299,7 +349,8 @@ export class FirebaseSyncService {
           // Local file matches cloud — use local (no re-download needed)
           console.log(`Audio for project ${projectId}: local matches cloud (hash OK)`);
           if (Platform.OS === 'web') {
-            return URL.createObjectURL(localBlob!);
+            localBlob = await this.ensureCleanAudio(projectId, localBlob!);
+            return URL.createObjectURL(localBlob);
           } else {
             return localPath!;
           }
@@ -309,7 +360,8 @@ export class FirebaseSyncService {
         console.log(`Downloading audio from Firebase Storage for project: ${projectId} (${hasLocal ? 'file changed' : 'not cached'})`);
 
         if (Platform.OS === 'web') {
-          const blob = await getBlob(storageRef);
+          let blob = await getBlob(storageRef);
+          blob = await this.ensureCleanAudio(projectId, blob);
           await DBService.saveAudio(projectId, blob);
           if (cloudHash) localStorage.setItem(hashKey, cloudHash);
           console.log(`Successfully downloaded & cached audio for project: ${projectId}`);
@@ -318,21 +370,26 @@ export class FirebaseSyncService {
           const downloadUrl = await getDownloadURL(storageRef);
           const dlPath = `${FileSystem.documentDirectory}${projectId}.mp3`;
           await FileSystem.downloadAsync(downloadUrl, dlPath);
-          // Note: on native, we don't have localStorage but can use AsyncStorage if needed
           return dlPath;
         }
       } catch (err) {
         // If cloud check fails but we have local, use local as fallback
         if (hasLocal) {
           console.warn(`Cloud check failed for project ${projectId}, using local fallback:`, err);
-          if (Platform.OS === 'web') return URL.createObjectURL(localBlob!);
+          if (Platform.OS === 'web') {
+            localBlob = await this.ensureCleanAudio(projectId, localBlob!);
+            return URL.createObjectURL(localBlob);
+          }
           return localPath!;
         }
         console.error(`Error downloading audio from Firebase Storage for project ${projectId}:`, err);
       }
     } else if (hasLocal) {
       // Offline but have local — use it
-      if (Platform.OS === 'web') return URL.createObjectURL(localBlob!);
+      if (Platform.OS === 'web') {
+        localBlob = await this.ensureCleanAudio(projectId, localBlob!);
+        return URL.createObjectURL(localBlob);
+      }
       return localPath!;
     }
 
