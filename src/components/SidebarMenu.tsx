@@ -21,6 +21,7 @@ interface SidebarMenuProps {
   isVisible: boolean;
   onClose: () => void;
   activeScreen?: string;
+  onGoHome?: () => void;
 }
 
 // SVG Icons for menu items
@@ -169,6 +170,7 @@ export default function SidebarMenu({
   isVisible,
   onClose,
   activeScreen = 'home',
+  onGoHome,
 }: SidebarMenuProps) {
   const [activeItem, setActiveItem] = useState(activeScreen);
   const [showUserDropdown, setShowUserDropdown] = useState(false);
@@ -226,14 +228,19 @@ export default function SidebarMenu({
   const renderSidebar = () => (
     <View style={styles.sidebar}>
       {/* Logo */}
-      <View style={styles.logoSection}>
+      <TouchableOpacity 
+        style={styles.logoSection} 
+        onPress={() => onGoHome?.()}
+        activeOpacity={0.7}
+        {...(IS_WEB ? { style: [styles.logoSection, { cursor: 'pointer' }] } : {})}
+      >
         <View style={styles.logoRow}>
           <View style={styles.logoIcon}>
             <Text style={styles.logoEmoji}>🎧</Text>
           </View>
-          <Text style={styles.logoText}>POUX LOOPER</Text>
+          <Text style={styles.logoText}>ENGLISH LOOPER</Text>
         </View>
-      </View>
+      </TouchableOpacity>
 
       {/* Menu Sections */}
       <ScrollView 

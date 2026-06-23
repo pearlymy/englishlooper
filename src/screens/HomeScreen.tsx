@@ -4,7 +4,7 @@ import {
   Text,
   View,
   TouchableOpacity,
-  FlatList,
+
   Alert,
   RefreshControl,
   Dimensions,
@@ -74,6 +74,7 @@ export default function HomeScreen({
   const [dimensions, setDimensions] = useState(Dimensions.get('window'));
   const [syncToast, setSyncToast] = useState<string | null>(null);
   const [progressMode, setProgressMode] = useState<'listening' | 'dictation' | 'translation'>('listening');
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Folder states
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -304,6 +305,32 @@ export default function HomeScreen({
       .folder-grid-card:hover .folder-actions {
         opacity: 1 !important;
       }
+      .mag-featured-card {
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      }
+      .mag-featured-card:hover {
+        transform: translateY(-3px) !important;
+        box-shadow: 0 20px 60px rgba(124, 58, 237, 0.18) !important;
+        border-color: #2a2a50 !important;
+      }
+      .mag-grid-card {
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      }
+      .mag-grid-card:hover {
+        transform: translateY(-4px) !important;
+        border-color: #2a2a50 !important;
+        box-shadow: 0 12px 32px rgba(124, 58, 237, 0.12) !important;
+      }
+      .mag-grid-card .mag-del-btn {
+        opacity: 0;
+        transition: opacity 0.2s ease;
+      }
+      .mag-grid-card:hover .mag-del-btn {
+        opacity: 0.6 !important;
+      }
+      .mag-grid-card .mag-del-btn:hover {
+        opacity: 1 !important;
+      }
     `;
     document.head.appendChild(style);
   }, []);
@@ -338,10 +365,20 @@ export default function HomeScreen({
       confirmText: 'Xóa',
       confirmColor: '#ef4444',
       onConfirm: async () => {
-        await StorageService.deleteProject(project.id);
-        await FirebaseSyncService.deleteProject(project.id);
-        onRefresh();
-        setConfirmDialog(null);
+        try {
+          await StorageService.deleteProject(project.id);
+          // Clean up cached audio hash from localStorage
+          try { localStorage.removeItem(`audio_hash_${project.id}`); } catch (_) {}
+          await FirebaseSyncService.deleteProject(project.id).catch(err => 
+            console.warn('Firebase delete failed (non-blocking):', err)
+          );
+          onRefresh();
+        } catch (err) {
+          console.error('Lỗi xóa project:', err);
+          showAlert('Lỗi', 'Không thể xóa bài học. Vui lòng thử lại.');
+        } finally {
+          setConfirmDialog(null);
+        }
       },
     });
   };
@@ -407,15 +444,27 @@ export default function HomeScreen({
       confirmText: 'Xóa toàn bộ',
       confirmColor: '#ef4444',
       onConfirm: async () => {
-        await StorageService.deleteFolder(folder.id);
-        await FirebaseSyncService.deleteFolder(folder.id);
-        const folderProjects = projects.filter(p => p.folderId === folder.id);
-        for (const p of folderProjects) {
-          await FirebaseSyncService.deleteProject(p.id);
+        try {
+          await StorageService.deleteFolder(folder.id);
+          await FirebaseSyncService.deleteFolder(folder.id).catch(err =>
+            console.warn('Firebase folder delete failed (non-blocking):', err)
+          );
+          const folderProjects = projects.filter(p => p.folderId === folder.id);
+          for (const p of folderProjects) {
+            // Clean up cached audio hash
+            try { localStorage.removeItem(`audio_hash_${p.id}`); } catch (_) {}
+            await FirebaseSyncService.deleteProject(p.id).catch(err =>
+              console.warn('Firebase project delete failed (non-blocking):', err)
+            );
+          }
+          await loadFolders();
+          onRefresh();
+        } catch (err) {
+          console.error('Lỗi xóa folder:', err);
+          showAlert('Lỗi', 'Không thể xóa thư mục. Vui lòng thử lại.');
+        } finally {
+          setConfirmDialog(null);
         }
-        await loadFolders();
-        onRefresh();
-        setConfirmDialog(null);
       },
     });
   };
@@ -647,6 +696,287 @@ export default function HomeScreen({
     );
   };
 
+  // ─── MAGAZINE LAYOUT: Featured Card ───
+  const renderFeaturedCard = (project: Project) => {
+    const pct = getProgress(project);
+    const c = getProgressColor(pct);
+    const learned = project.segments.filter(s => (s.studyCount || 0) > 0).length;
+    const notStarted = project.segments.length - learned;
+    const dictDone = project.segments.filter(s => s.dictationAccuracy !== undefined).length;
+    const dictNotDone = project.segments.length - dictDone;
+    const dictAvg = getDictationAvgAccuracy(project);
+    const transDone = project.segments.filter(s => s.translationAccuracy !== undefined).length;
+    const transNotDone = project.segments.length - transDone;
+    const transAvg = getTranslationAvgAccuracy(project);
+    const ctaLabel = pct === 0 ? 'Bắt đầu học' : pct >= 100 ? 'Ôn lại bài' : 'Tiếp tục học';
+    const ctaIcon = pct >= 100 ? '✓' : '▶';
+
+    return (
+      <TouchableOpacity
+        key={`featured_${project.id}`}
+        ref={(r: any) => { if (IS_WEB && r?.classList && !r.classList.contains('mag-featured-card')) r.classList.add('mag-featured-card'); }}
+        style={[magStyles.featuredCard, IS_WEB && { background: `linear-gradient(135deg, #0e0e1e 0%, ${c}08 40%, #0e0e1e 100%)` } as any]}
+        activeOpacity={0.85}
+        onPress={() => onOpenProject(project)}
+      >
+        {/* Status label */}
+        <View style={magStyles.featuredLabel}>
+          <View style={[magStyles.featuredLabelDot, { backgroundColor: c }]} />
+          <Text style={[magStyles.featuredLabelText, { color: c }]}>
+            {pct >= 100 ? 'Hoàn thành' : pct > 0 ? 'Đang học' : 'Chưa bắt đầu'}
+          </Text>
+        </View>
+        
+        {/* Main content */}
+        <View style={magStyles.featuredContent}>
+          <View style={{ flexShrink: 0 }}>
+            <ProgressRing pct={pct} color={c} size={isWide ? 88 : 68} />
+          </View>
+          <View style={{ flex: 1, minWidth: 0, gap: 6 }}>
+            <Text style={magStyles.featuredTitle} numberOfLines={2}>{project.title}</Text>
+            <View style={styles.metaRow}>
+              <Text style={magStyles.featuredMeta}>{fmtDate(project.createdAt)}</Text>
+              <Text style={[styles.metaSep, { marginHorizontal: 6 }]}>·</Text>
+              <Text style={magStyles.featuredMeta}>{fmtDur(project.durationMs)}</Text>
+              <Text style={[styles.metaSep, { marginHorizontal: 6 }]}>·</Text>
+              <Text style={magStyles.featuredMeta}>{project.segments.length} câu</Text>
+            </View>
+            <View style={[styles.statsRow, { marginTop: 4, flexWrap: 'wrap' }]}>
+              {progressMode === 'listening' ? (<>
+                {notStarted > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(99,102,241,0.12)', borderColor: 'rgba(99,102,241,0.25)' }]}>
+                    <View style={[styles.statDot, { backgroundColor: '#6366f1' }]} />
+                    <Text style={[styles.statText, { color: '#818cf8' }]}>{notStarted} chưa</Text>
+                  </View>
+                )}
+                {learned > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(16,185,129,0.12)', borderColor: 'rgba(16,185,129,0.25)' }]}>
+                    <View style={[styles.statDot, { backgroundColor: '#10b981' }]} />
+                    <Text style={[styles.statText, { color: '#34d399' }]}>{learned} đã học</Text>
+                  </View>
+                )}
+              </>) : progressMode === 'dictation' ? (<>
+                {dictNotDone > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(107,114,128,0.12)', borderColor: 'rgba(107,114,128,0.25)' }]}>
+                    <View style={[styles.statDot, { backgroundColor: '#6b7280' }]} />
+                    <Text style={[styles.statText, { color: '#9ca3af' }]}>{dictNotDone}</Text>
+                  </View>
+                )}
+                {dictDone > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(16,185,129,0.12)', borderColor: 'rgba(16,185,129,0.25)' }]}>
+                    <View style={[styles.statDot, { backgroundColor: '#10b981' }]} />
+                    <Text style={[styles.statText, { color: '#34d399' }]}>{dictDone}</Text>
+                  </View>
+                )}
+                {dictAvg > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(34,197,94,0.12)', borderColor: 'rgba(34,197,94,0.25)' }]}>
+                    <Text style={[styles.statText, { color: '#22c55e', fontWeight: '700' }]}>⌀ {dictAvg}%</Text>
+                  </View>
+                )}
+              </>) : (<>
+                {transNotDone > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(107,114,128,0.12)', borderColor: 'rgba(107,114,128,0.25)' }]}>
+                    <View style={[styles.statDot, { backgroundColor: '#6b7280' }]} />
+                    <Text style={[styles.statText, { color: '#9ca3af' }]}>{transNotDone}</Text>
+                  </View>
+                )}
+                {transDone > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(16,185,129,0.12)', borderColor: 'rgba(16,185,129,0.25)' }]}>
+                    <View style={[styles.statDot, { backgroundColor: '#10b981' }]} />
+                    <Text style={[styles.statText, { color: '#34d399' }]}>{transDone}</Text>
+                  </View>
+                )}
+                {transAvg > 0 && (
+                  <View style={[styles.statPill, { backgroundColor: 'rgba(13,148,136,0.12)', borderColor: 'rgba(13,148,136,0.25)' }]}>
+                    <Text style={[styles.statText, { color: '#2dd4bf', fontWeight: '700' }]}>⌀ {transAvg}%</Text>
+                  </View>
+                )}
+              </>)}
+            </View>
+          </View>
+        </View>
+
+        {/* Bottom CTA */}
+        <View style={magStyles.featuredBottom}>
+          <View style={[magStyles.featuredCta, pct === 0 ? styles.ctaBtnStart : pct >= 100 ? styles.ctaBtnDone : styles.ctaBtnContinue]}>
+            <Text style={[styles.ctaBtnText, { fontSize: 14 }, pct >= 100 && { color: '#10b981' }]}>{ctaIcon}  {ctaLabel}</Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.delBtn, { opacity: 0.3 }]}
+            onPress={(e) => { e?.stopPropagation?.(); handleDelete(project); }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            {IS_WEB ? (
+              <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="#555" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            ) : <Text style={styles.delBtnText}>🗑</Text>}
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  // ─── MAGAZINE LAYOUT: Stats Panel ───
+  const renderStatsPanel = (projectsList: Project[]) => {
+    const totalSegs = projectsList.reduce((s, p) => s + p.segments.length, 0);
+    const totalDurMs = projectsList.reduce((s, p) => s + p.durationMs, 0);
+    const totalMin = Math.floor(totalDurMs / 60000);
+    const totalHr = Math.floor(totalMin / 60);
+    const remMin = totalMin % 60;
+
+    let doneSegs = 0;
+    let avgAcc = 0;
+    if (progressMode === 'listening') {
+      doneSegs = projectsList.reduce((s, p) => s + p.segments.filter(seg => (seg.studyCount || 0) > 0).length, 0);
+    } else if (progressMode === 'dictation') {
+      const withAcc = projectsList.flatMap(p => p.segments.filter(seg => seg.dictationAccuracy !== undefined));
+      doneSegs = withAcc.length;
+      avgAcc = withAcc.length > 0 ? Math.round(withAcc.reduce((s, seg) => s + (seg.dictationAccuracy || 0), 0) / withAcc.length) : 0;
+    } else {
+      const withAcc = projectsList.flatMap(p => p.segments.filter(seg => seg.translationAccuracy !== undefined));
+      doneSegs = withAcc.length;
+      avgAcc = withAcc.length > 0 ? Math.round(withAcc.reduce((s, seg) => s + (seg.translationAccuracy || 0), 0) / withAcc.length) : 0;
+    }
+    const overallPct = totalSegs > 0 ? Math.round((doneSegs / totalSegs) * 100) : 0;
+    const overallColor = getProgressColor(overallPct);
+
+    return (
+      <View style={magStyles.statsPanel}>
+        <Text style={magStyles.statsPanelTitle}>📊 Tổng quan</Text>
+
+        {/* Overall progress bar */}
+        <View style={magStyles.statsProgressWrap}>
+          <View style={magStyles.statsProgressBg}>
+            {IS_WEB ? (
+              <View style={[magStyles.statsProgressFill, { width: `${overallPct}%`, background: `linear-gradient(90deg, ${overallColor}, ${overallColor}aa)` } as any]} />
+            ) : (
+              <View style={[magStyles.statsProgressFill, { width: `${overallPct}%`, backgroundColor: overallColor } as any]} />
+            )}
+          </View>
+          <Text style={[magStyles.statsProgressLabel, { color: overallColor }]}>{overallPct}%</Text>
+        </View>
+
+        {/* Stat grid */}
+        <View style={magStyles.statsGrid}>
+          <View style={magStyles.statsGridItem}>
+            <Text style={magStyles.statsGridValue}>{projectsList.length}</Text>
+            <Text style={magStyles.statsGridLabel}>bài học</Text>
+          </View>
+          <View style={magStyles.statsGridItem}>
+            <Text style={[magStyles.statsGridValue, { color: '#a78bfa' }]}>{doneSegs}</Text>
+            <Text style={magStyles.statsGridLabel}>câu xong</Text>
+          </View>
+          <View style={magStyles.statsGridItem}>
+            <Text style={[magStyles.statsGridValue, { color: '#6366f1' }]}>{totalSegs - doneSegs}</Text>
+            <Text style={magStyles.statsGridLabel}>còn lại</Text>
+          </View>
+          <View style={magStyles.statsGridItem}>
+            <Text style={magStyles.statsGridValue}>{totalHr > 0 ? `${totalHr}h${remMin}` : `${remMin}p`}</Text>
+            <Text style={magStyles.statsGridLabel}>thời gian</Text>
+          </View>
+        </View>
+
+        {/* Average accuracy for dictation/translation modes */}
+        {progressMode !== 'listening' && avgAcc > 0 && (
+          <View style={magStyles.statsAccuracyWrap}>
+            <Text style={magStyles.statsAccuracyLabel}>{progressMode === 'dictation' ? '✍️ Chính xác TB' : '🔄 Dịch TB'}</Text>
+            <Text style={[magStyles.statsAccuracyValue, { color: avgAcc >= 80 ? '#10b981' : avgAcc >= 50 ? '#f59e0b' : '#ef4444' }]}>{avgAcc}%</Text>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  // ─── MAGAZINE LAYOUT: Grid Card (compact) ───
+  const renderMagGridCard = (project: Project) => {
+    const pct = getProgress(project);
+    const c = getProgressColor(pct);
+    const ctaLabel = pct === 0 ? 'Bắt đầu' : pct >= 100 ? 'Ôn lại' : 'Tiếp tục';
+    const ctaIcon = pct >= 100 ? '✓' : '▶';
+
+    // Stats for current mode
+    let doneStat = 0, totalStat = project.segments.length;
+    if (progressMode === 'listening') {
+      doneStat = project.segments.filter(s => (s.studyCount || 0) > 0).length;
+    } else if (progressMode === 'dictation') {
+      doneStat = project.segments.filter(s => s.dictationAccuracy !== undefined).length;
+    } else {
+      doneStat = project.segments.filter(s => s.translationAccuracy !== undefined).length;
+    }
+    const remainStat = totalStat - doneStat;
+
+    const magGridCols = isWide ? (dimensions.width > 1200 ? 3 : 2) : (dimensions.width > 480 ? 2 : 1);
+    const cardWidth = `${(100 / magGridCols) - (magGridCols > 1 ? 1.5 : 0)}%`;
+
+    return (
+      <View
+        key={project.id}
+        ref={(r: any) => { if (IS_WEB && r?.classList && !r.classList.contains('mag-grid-card')) r.classList.add('mag-grid-card'); }}
+        style={[magStyles.gridCard, { width: cardWidth as any }]}
+      >
+        <TouchableOpacity
+          style={{ flex: 1 }}
+          activeOpacity={0.7}
+          onPress={() => onOpenProject(project)}
+        >
+          {/* Progress bar */}
+          <View style={magStyles.gridProgressWrap}>
+            <View style={magStyles.gridProgressBg}>
+              {IS_WEB ? (
+                <View style={[magStyles.gridProgressFill, { width: `${pct}%`, background: `linear-gradient(90deg, ${c}, ${c}88)` } as any]} />
+              ) : (
+                <View style={[magStyles.gridProgressFill, { width: `${pct}%`, backgroundColor: c } as any]} />
+              )}
+            </View>
+            <Text style={[magStyles.gridProgressText, { color: pct > 0 ? c : '#4a4a6a' }]}>{pct}%</Text>
+          </View>
+
+          {/* Title */}
+          <Text style={magStyles.gridTitle} numberOfLines={2}>{project.title}</Text>
+
+          {/* Meta */}
+          <Text style={magStyles.gridMeta}>{fmtDur(project.durationMs)} · {project.segments.length} câu</Text>
+
+          {/* Stats row */}
+          <View style={magStyles.gridStatsRow}>
+            {remainStat > 0 && (
+              <View style={magStyles.gridStatChip}>
+                <View style={[magStyles.gridStatDot, { backgroundColor: '#6366f1' }]} />
+                <Text style={[magStyles.gridStatText, { color: '#818cf8' }]}>{remainStat}</Text>
+              </View>
+            )}
+            {doneStat > 0 && (
+              <View style={magStyles.gridStatChip}>
+                <View style={[magStyles.gridStatDot, { backgroundColor: '#10b981' }]} />
+                <Text style={[magStyles.gridStatText, { color: '#34d399' }]}>{doneStat}</Text>
+              </View>
+            )}
+          </View>
+
+          {/* Bottom: Delete only (hover reveal) */}
+          <View style={magStyles.gridBottom}>
+            <View />
+            <TouchableOpacity
+              ref={(r: any) => { if (IS_WEB && r?.classList && !r.classList.contains('mag-del-btn')) r.classList.add('mag-del-btn'); }}
+              style={magStyles.gridDelBtn}
+              onPress={(e) => { e?.stopPropagation?.(); handleDelete(project); }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              {IS_WEB ? (
+                <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="#555" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+              ) : <Text style={{ color: '#555', fontSize: 11 }}>🗑</Text>}
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
   // Gradient colors for folder thumbnails
   const folderGradients = [
     ['#2d1b69', '#1a1145', '#7c3aed'],
@@ -796,21 +1126,48 @@ export default function HomeScreen({
     );
   };
 
-  const renderEmptyFolder = () => (
-    <View style={styles.emptyWrap}>
-      <Text style={styles.emptyIcon}>📂</Text>
-      <Text style={styles.emptyTitle}>Thư mục trống</Text>
-      <Text style={styles.emptySub}>
-        Chưa có bài học nào trong thư mục này.
-      </Text>
-      <TouchableOpacity 
-        style={styles.emptyBtn} 
-        onPress={() => onNewProject(activeFolderId === 'uncategorized' ? undefined : activeFolderId || undefined)}
-      >
-        <Text style={styles.emptyBtnText}>＋  Tạo bài học đầu tiên</Text>
-      </TouchableOpacity>
-    </View>
-  );
+  const renderEmptyFolder = () => {
+    if (searchQuery.trim()) {
+      return (
+        <View style={styles.emptyWrap}>
+          {IS_WEB ? (
+            <View style={{ marginBottom: 12 }}>
+              <svg width={40} height={40} viewBox="0 0 24 24" fill="none" stroke="#4a4a6a" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                <line x1="8" y1="11" x2="14" y2="11" />
+              </svg>
+            </View>
+          ) : <Text style={styles.emptyIcon}>🔍</Text>}
+          <Text style={styles.emptyTitle}>Không tìm thấy kết quả</Text>
+          <Text style={styles.emptySub}>
+            Không có bài học nào khớp với "{searchQuery.trim()}"
+          </Text>
+          <TouchableOpacity 
+            style={styles.emptyBtn} 
+            onPress={() => setSearchQuery('')}
+          >
+            <Text style={styles.emptyBtnText}>✕  Xóa tìm kiếm</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.emptyWrap}>
+        <Text style={styles.emptyIcon}>📂</Text>
+        <Text style={styles.emptyTitle}>Thư mục trống</Text>
+        <Text style={styles.emptySub}>
+          Chưa có bài học nào trong thư mục này.
+        </Text>
+        <TouchableOpacity 
+          style={styles.emptyBtn} 
+          onPress={() => onNewProject(activeFolderId === 'uncategorized' ? undefined : activeFolderId || undefined)}
+        >
+          <Text style={styles.emptyBtnText}>＋  Tạo bài học đầu tiên</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
 
   const renderEmptyFolders = () => (
     <View style={styles.emptyWrap}>
@@ -854,9 +1211,14 @@ export default function HomeScreen({
   const currentFolder = folders.find(f => f.id === activeFolderId);
   const activeFolderTitle = activeFolderId === 'uncategorized' ? 'Chưa phân loại' : (currentFolder?.name || 'Thư mục');
 
-  const filteredProjects = projects.filter(p => 
-    activeFolderId === 'uncategorized' ? !p.folderId : p.folderId === activeFolderId
-  );
+  const filteredProjects = projects.filter(p => {
+    const inFolder = activeFolderId === 'uncategorized' ? !p.folderId : p.folderId === activeFolderId;
+    if (!inFolder) return false;
+    if (searchQuery.trim()) {
+      return p.title.toLowerCase().includes(searchQuery.trim().toLowerCase());
+    }
+    return true;
+  });
 
   // Summary stats for header
   const totalProjects = activeFolderId !== null ? filteredProjects.length : projects.length;
@@ -872,7 +1234,7 @@ export default function HomeScreen({
       <View style={[styles.header, isWide && styles.headerWide]}>
         {activeFolderId !== null ? (
           <View style={styles.headerLeftRow}>
-            <TouchableOpacity style={styles.backBtn} onPress={() => setActiveFolderId(null)}>
+            <TouchableOpacity style={styles.backBtn} onPress={() => { setSearchQuery(''); setActiveFolderId(null); }}>
               <Text style={styles.backBtnText}>‹</Text>
             </TouchableOpacity>
             <View style={{ marginLeft: 10, flex: 1, minWidth: 0 }}>
@@ -932,37 +1294,93 @@ export default function HomeScreen({
         </View>
       </View>
 
-      {/* Summary Stats + Progress Mode Toggle */}
-      {activeFolderId !== null && totalProjects > 0 && (
+      {/* Summary Stats + Search + Progress Mode Toggle — single row */}
+      {activeFolderId !== null && (
         <View style={[styles.summaryBar, isWide && { paddingHorizontal: 40 }]}>
-          <Text style={styles.summaryText}>
-            {totalProjects} bài học
-            {learningProjects > 0 ? `  ·  ${learningProjects} đang học` : ''}
-            {completedProjects > 0 ? `  ·  ${completedProjects} hoàn thành` : ''}
-          </Text>
-          <View style={styles.toggleBar}>
-            <TouchableOpacity
-              style={[styles.togglePill, progressMode === 'listening' && styles.togglePillActive]}
-              onPress={() => setProgressMode('listening')}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.toggleText, progressMode === 'listening' && styles.toggleTextActive]}>🎧 Nghe</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.togglePill, progressMode === 'dictation' && styles.togglePillActiveDictation]}
-              onPress={() => setProgressMode('dictation')}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.toggleText, progressMode === 'dictation' && styles.toggleTextActiveDictation]}>✍️ Chính tả</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.togglePill, progressMode === 'translation' && styles.togglePillActiveTranslation]}
-              onPress={() => setProgressMode('translation')}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.toggleText, progressMode === 'translation' && styles.toggleTextActiveTranslation]}>🔄 Dịch câu</Text>
-            </TouchableOpacity>
+          {/* Search Bar (left) */}
+          <View style={magStyles.searchBar}>
+            {IS_WEB ? (
+              <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="#5a5a7a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', flexShrink: 0 } as any}>
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+            ) : null}
+            <TextInput
+              style={magStyles.searchInput}
+              placeholder="Tìm bài học..."
+              placeholderTextColor="#4a4a6a"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity onPress={() => setSearchQuery('')} style={{ padding: 4 }}>
+                {IS_WEB ? (
+                  <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#5a5a7a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                ) : <Text style={{ color: '#5a5a7a', fontSize: 14 }}>✕</Text>}
+              </TouchableOpacity>
+            )}
           </View>
+
+          {/* Stats + Toggle (right) */}
+          {totalProjects > 0 && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
+              <View style={styles.toggleBar}>
+                <TouchableOpacity
+                  style={[styles.togglePill, progressMode === 'listening' && styles.togglePillActive]}
+                  onPress={() => setProgressMode('listening')}
+                  activeOpacity={0.7}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    {IS_WEB ? (
+                      <svg width={14} height={14} viewBox="0 0 24 24" fill={progressMode === 'listening' ? '#c4b5fd' : '#555'} style={{ display: 'block' } as any}>
+                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" stroke={progressMode === 'listening' ? '#c4b5fd' : '#555'} strokeWidth="2" strokeLinecap="round" />
+                        <line x1="12" y1="19" x2="12" y2="23" stroke={progressMode === 'listening' ? '#c4b5fd' : '#555'} strokeWidth="2" strokeLinecap="round" />
+                        <line x1="8" y1="23" x2="16" y2="23" stroke={progressMode === 'listening' ? '#c4b5fd' : '#555'} strokeWidth="2" strokeLinecap="round" />
+                      </svg>
+                    ) : null}
+                    <Text style={[styles.toggleText, progressMode === 'listening' && styles.toggleTextActive]}>Nghe</Text>
+                  </View>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.togglePill, progressMode === 'dictation' && styles.togglePillActiveDictation]}
+                  onPress={() => setProgressMode('dictation')}
+                  activeOpacity={0.7}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    {IS_WEB ? (
+                      <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={progressMode === 'dictation' ? '#34d399' : '#555'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                        <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                      </svg>
+                    ) : null}
+                    <Text style={[styles.toggleText, progressMode === 'dictation' && styles.toggleTextActiveDictation]}>Chính tả</Text>
+                  </View>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.togglePill, progressMode === 'translation' && styles.togglePillActiveTranslation]}
+                  onPress={() => setProgressMode('translation')}
+                  activeOpacity={0.7}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    {IS_WEB ? (
+                      <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={progressMode === 'translation' ? '#2dd4bf' : '#555'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                        <path d="M5 8l6 6" />
+                        <path d="M4 14l6-6 2-3" />
+                        <path d="M2 5h12" />
+                        <path d="M7 2h1" />
+                        <path d="M22 22l-5-10-5 10" />
+                        <path d="M14 18h6" />
+                      </svg>
+                    ) : null}
+                    <Text style={[styles.toggleText, progressMode === 'translation' && styles.toggleTextActiveTranslation]}>Dịch câu</Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
         </View>
       )}
 
@@ -985,23 +1403,49 @@ export default function HomeScreen({
 
       {/* List */}
       {activeFolderId !== null ? (
-        <FlatList
-          key={'list_projects'}
-          data={filteredProjects}
-          keyExtractor={(item: any) => item.id}
-          renderItem={renderCard}
-          numColumns={1}
-          ListEmptyComponent={renderEmptyFolder}
+        <ScrollView
+          showsVerticalScrollIndicator={false}
           contentContainerStyle={
             filteredProjects.length === 0
               ? styles.emptyContainer
               : [styles.listContent, isWide && styles.listContentWide]
           }
-          showsVerticalScrollIndicator={false}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#a855f7" colors={['#a855f7']} />
           }
-        />
+        >
+          {filteredProjects.length === 0 ? renderEmptyFolder() : (
+            <>
+              {/* ── MAGAZINE TOP: Featured + Stats ── */}
+              {filteredProjects.length > 0 && (
+                <View style={[magStyles.magTopRow, !isWide && { flexDirection: 'column' }]}>
+                  {/* Featured card */}
+                  <View style={[magStyles.magFeaturedWrap, !isWide && { width: '100%' }]}>
+                    {renderFeaturedCard(filteredProjects[0])}
+                  </View>
+                  {/* Stats panel */}
+                  <View style={[magStyles.magStatsWrap, !isWide && { width: '100%' }]}>
+                    {renderStatsPanel(filteredProjects)}
+                  </View>
+                </View>
+              )}
+
+              {/* ── MAGAZINE GRID: Remaining cards ── */}
+              {filteredProjects.length > 1 && (
+                <>
+                  <View style={magStyles.magGridHeader}>
+                    <View style={magStyles.magGridHeaderLine} />
+                    <Text style={magStyles.magGridHeaderText}>Tất cả bài học</Text>
+                    <View style={magStyles.magGridHeaderLine} />
+                  </View>
+                  <View style={magStyles.magGrid}>
+                    {filteredProjects.slice(1).map(p => renderMagGridCard(p))}
+                  </View>
+                </>
+              )}
+            </>
+          )}
+        </ScrollView>
       ) : (
         <ScrollView
           showsVerticalScrollIndicator={false}
@@ -1427,10 +1871,11 @@ const styles = StyleSheet.create({
   summaryBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
     gap: 14,
     paddingHorizontal: 24,
     paddingBottom: 10,
+    flexWrap: 'wrap',
   },
   summaryText: {
     color: '#555',
@@ -1778,9 +2223,10 @@ const styles = StyleSheet.create({
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
+    backgroundColor: 'rgba(0,0,0,0.55)',
     justifyContent: 'center',
     alignItems: 'center',
+    ...(IS_WEB ? { backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' } as any : {}),
   },
   modalOverlayBottom: {
     justifyContent: 'flex-end',
@@ -2113,5 +2559,325 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#fff',
+  },
+});
+
+// ─── MAGAZINE LAYOUT STYLES ───
+const magStyles = StyleSheet.create({
+  // Top row: Featured + Stats side by side
+  magTopRow: {
+    flexDirection: 'row',
+    gap: 16,
+    marginBottom: 24,
+  },
+  magFeaturedWrap: {
+    flex: 3,
+    minWidth: 0,
+  },
+  magStatsWrap: {
+    flex: 2,
+    minWidth: 0,
+  },
+
+  // Featured Card
+  featuredCard: {
+    backgroundColor: '#0e0e1e',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#1e1e38',
+    padding: 20,
+    gap: 16,
+    height: '100%',
+    ...(IS_WEB ? { cursor: 'pointer' } as any : {}),
+  },
+  featuredLabel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  featuredLabelDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  featuredLabelText: {
+    fontSize: 11,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  featuredContent: {
+    flexDirection: 'row',
+    gap: 18,
+    alignItems: 'center',
+  },
+  featuredTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#fff',
+    letterSpacing: -0.3,
+    lineHeight: 26,
+  },
+  featuredMeta: {
+    fontSize: 12,
+    color: '#5a5a7a',
+    fontWeight: '600',
+  },
+  featuredBottom: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 4,
+  },
+  featuredCta: {
+    paddingVertical: 10,
+    paddingHorizontal: 22,
+    borderRadius: 12,
+    ...(IS_WEB ? { cursor: 'pointer' } as any : {}),
+  },
+
+  // Stats Panel
+  statsPanel: {
+    backgroundColor: '#0e0e1e',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#1e1e38',
+    padding: 16,
+    gap: 12,
+    height: '100%',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  statsPanelTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#e0e0f0',
+  },
+  statsProgressWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  statsProgressBg: {
+    flex: 1,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#1a1a2e',
+    overflow: 'hidden',
+  },
+  statsProgressFill: {
+    height: '100%',
+    borderRadius: 4,
+    ...(IS_WEB ? { transition: 'width 0.5s ease' } as any : {}),
+  },
+  statsProgressLabel: {
+    fontSize: 14,
+    fontWeight: '800',
+    minWidth: 36,
+    textAlign: 'right',
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+  },
+  statsGridItem: {
+    flex: 1,
+    minWidth: '45%',
+    backgroundColor: '#12122a',
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#1a1a30',
+  },
+  statsGridValue: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#e0e0f0',
+    letterSpacing: -0.5,
+  },
+  statsGridLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#4a4a6a',
+    marginTop: 2,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  statsAccuracyWrap: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#12122a',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: '#1a1a30',
+  },
+  statsAccuracyLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#8b8ba8',
+  },
+  statsAccuracyValue: {
+    fontSize: 18,
+    fontWeight: '800',
+  },
+
+  // Grid Header
+  magGridHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    marginBottom: 16,
+    marginTop: 8,
+  },
+  magGridHeaderLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#1a1a2e',
+  },
+  magGridHeaderText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#4a4a6a',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+
+  // Grid container
+  magGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+
+  // Grid Card
+  gridCard: {
+    backgroundColor: '#0c0c18',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#16162a',
+    overflow: 'hidden',
+    ...(IS_WEB ? { cursor: 'pointer' } as any : {}),
+  },
+  gridProgressWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: 2,
+    gap: 8,
+  },
+  gridProgressBg: {
+    flex: 1,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#1a1a2e',
+    overflow: 'hidden',
+  },
+  gridProgressFill: {
+    height: '100%',
+    borderRadius: 3,
+    ...(IS_WEB ? { transition: 'width 0.4s ease' } as any : {}),
+  },
+  gridProgressText: {
+    fontSize: 11,
+    fontWeight: '800',
+    minWidth: 28,
+    textAlign: 'right',
+  },
+  gridTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#e8e8f0',
+    letterSpacing: -0.2,
+    lineHeight: 19,
+    paddingHorizontal: 14,
+    paddingTop: 4,
+  },
+  gridMeta: {
+    fontSize: 11,
+    color: '#4a4a6a',
+    fontWeight: '600',
+    paddingHorizontal: 14,
+    marginTop: 2,
+  },
+  gridStatsRow: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingHorizontal: 14,
+    marginTop: 4,
+  },
+  gridStatChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+  },
+  gridStatDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+  },
+  gridStatText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  gridBottom: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    marginTop: 2,
+  },
+  gridCta: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    ...(IS_WEB ? { cursor: 'pointer' } as any : {}),
+  },
+  gridDelBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    opacity: 0,
+    ...(IS_WEB ? { cursor: 'pointer' } as any : {}),
+  },
+
+  // Search Bar
+  searchWrap: {
+    paddingHorizontal: 20,
+    paddingBottom: 10,
+  },
+  searchBar: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0c0c18',
+    borderWidth: 1,
+    borderColor: '#1e1e30',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 2,
+    gap: 10,
+    ...(IS_WEB ? { backdropFilter: 'blur(8px)' } as any : {}),
+  },
+  searchInput: {
+    flex: 1,
+    color: '#e0e0f0',
+    fontSize: 13,
+    fontWeight: '500',
+    paddingVertical: 8,
+    ...(IS_WEB ? { outlineStyle: 'none' } as any : {}),
   },
 });

@@ -637,7 +637,7 @@ export default function App() {
         <View style={styles.loginCard}>
           <View style={{ alignItems: 'center', marginBottom: 28, width: '100%' }}>
             <View style={styles.logoBadge}>
-              <Text style={styles.logoBadgeText}>🎧 POUX LOOPER</Text>
+              <Text style={styles.logoBadgeText}>🎧 ENGLISH LOOPER</Text>
             </View>
             <Text style={styles.loginTitle}>English Shadowing</Text>
             <Text style={styles.loginSubtitle}>
@@ -792,14 +792,12 @@ export default function App() {
           isVisible={isWideScreen || sidebarVisible}
           onClose={() => setSidebarVisible(false)}
           activeScreen="home"
+          onGoHome={() => { setScreen('home'); setActiveProject(null); }}
         />
       )}
 
       {/* Main Content */}
-      <View style={[
-        styles.mainContent,
-        currentUser && isWideScreen && { marginLeft: SIDEBAR_WIDTH },
-      ]}>
+      <View style={styles.mainContent}>
         {/* Mobile hamburger button */}
         {currentUser && !isWideScreen && screen === 'home' && (
           <TouchableOpacity

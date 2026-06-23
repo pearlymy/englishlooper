@@ -200,6 +200,21 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
   const [editTranscriptText, setEditTranscriptText] = useState('');
 
   const prevActiveSegmentIdRef = useRef<string | null>(null);
+  const dictationInputRef = useRef<any>(null);
+  const translationInputRef = useRef<any>(null);
+
+  // Focus input fields when segment or tab changes
+  useEffect(() => {
+    if (!IS_WEB) return;
+    const timer = setTimeout(() => {
+      if (activeTab === 'dictation') {
+        dictationInputRef.current?.focus?.();
+      } else if (activeTab === 'translation') {
+        translationInputRef.current?.focus?.();
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [activeSegmentId, activeTab]);
 
   useEffect(() => {
     const prevId = prevActiveSegmentIdRef.current;
@@ -679,6 +694,81 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     })
   ).current;
 
+  // ── KEYBOARD SHORTCUTS (Web) ──
+  const handlePrevRef = useRef(handlePrev);
+  const handleNextRef = useRef(handleNext);
+  const handlePlayPauseRef = useRef(handlePlayPause);
+  handlePrevRef.current = handlePrev;
+  handleNextRef.current = handleNext;
+  handlePlayPauseRef.current = handlePlayPause;
+
+  // Action refs for dictation/translation shortcuts (updated after handlers are defined below)
+  const shortcutActionsRef = useRef({
+    activeTab: activeTab as string,
+    hintDictation: (() => {}) as () => void,
+    hintTranslation: (() => {}) as () => void,
+    showDictAnswer: false,
+    showTransAnswer: false,
+  });
+
+  useEffect(() => {
+    if (!IS_WEB) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      const sa = shortcutActionsRef.current;
+      const inPractice = sa.activeTab === 'dictation' || sa.activeTab === 'translation';
+
+      // ArrowUp → Show/Hide answer (works even in input)
+      if (e.key === 'ArrowUp' && inPractice) {
+        e.preventDefault();
+        if (sa.activeTab === 'dictation') setShowDictationAnswer(!sa.showDictAnswer);
+        else setShowTranslationAnswer(!sa.showTransAnswer);
+        return;
+      }
+
+      // ArrowDown → Hint (works even in input)
+      if (e.key === 'ArrowDown' && inPractice) {
+        e.preventDefault();
+        if (sa.activeTab === 'dictation') sa.hintDictation();
+        else sa.hintTranslation();
+        return;
+      }
+
+      // Escape → Clear input (works even in input)
+      if (e.key === 'Escape' && inPractice) {
+        e.preventDefault();
+        if (sa.activeTab === 'dictation') {
+          setDictationInput('');
+          setIsDictationChecked(false);
+        } else {
+          setTranslationInput('');
+          setIsTranslationChecked(false);
+        }
+        return;
+      }
+
+      // Skip normal keys if user is typing in an input/textarea
+      if (tag === 'input' || tag === 'textarea') return;
+
+      switch (e.key) {
+        case 'ArrowLeft':
+          e.preventDefault();
+          handlePrevRef.current();
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          handleNextRef.current();
+          break;
+        case ' ':
+          e.preventDefault();
+          handlePlayPauseRef.current();
+          break;
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   // Merge / Split
   const handleMerge = () => {
     if (!activeSegmentId) return;
@@ -947,6 +1037,9 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     );
 
     setIsDictationChecked(true);
+    if (pct === 100) {
+      dictationInputRef.current?.blur?.();
+    }
   };
 
   const handleDictationHint = () => {
@@ -983,18 +1076,26 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
       inputWords.length === targetWords.length &&
       targetWords.every((tWord, idx) => cleanWord(inputWords[idx] || '') === cleanWord(tWord));
 
-    const wordRender = (showDictationAnswer || isDictationChecked) ? (
+    const wordRender = showDictationAnswer ? (
+      <View style={{ width: '100%', alignItems: 'center', gap: 6 }}>
+        <Text style={[s.heroTranscript, isWide && s.heroTranscriptWide, { color: '#a78bfa', textAlign: 'center' }]}>
+          {targetText}
+        </Text>
+        {activeSegment.ipa ? (
+          <Text style={[s.heroIpa, isWide && s.heroIpaWide, { textAlign: 'center' }]}>
+            {activeSegment.ipa}
+          </Text>
+        ) : null}
+        {activeSegment.translation ? (
+          <Text style={[s.heroTranslation, isWide && s.heroTranslationWide, { textAlign: 'center', marginTop: 4 }]}>
+            {activeSegment.translation}
+          </Text>
+        ) : null}
+      </View>
+    ) : isDictationChecked ? (
       <View style={s.dictationWordsWrap}>
         {targetWords.map((tWord, idx) => {
           const cleanTarget = cleanWord(tWord);
-          
-          if (showDictationAnswer) {
-            return (
-              <Text key={idx} style={[s.dictationWord, s.dictationWordHint]}>
-                {tWord}{' '}
-              </Text>
-            );
-          }
 
           if (idx < inputWords.length) {
             const cleanInput = cleanWord(inputWords[idx]);
@@ -1031,6 +1132,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     return (
       <View style={{ width: '100%', alignItems: 'center' }}>
         <TextInput
+          ref={dictationInputRef}
           style={s.dictationInput}
           placeholder="Nghe và gõ lại câu tại đây..."
           placeholderTextColor="#4b5563"
@@ -1047,21 +1149,55 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
 
         <View style={s.dictationActions}>
           <TouchableOpacity style={[s.dictationActionBtn, { borderColor: '#7c3aed' }]} onPress={handleCheckDictation}>
-            <Text style={[s.dictationActionBtnText, { color: '#c4b5fd' }]}>🔍 Kiểm tra</Text>
+            <View style={s.dictationActionBtnInner}>
+              {IS_WEB ? (
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+              ) : null}
+              <Text style={[s.dictationActionBtnText, { color: '#c4b5fd' }]}>Kiểm tra</Text>
+            </View>
+            {IS_WEB && isWide && <Text style={s.shortcutHint}>Enter</Text>}
           </TouchableOpacity>
           <TouchableOpacity style={s.dictationActionBtn} onPress={handleDictationHint}>
-            <Text style={s.dictationActionBtnText}>💡 Gợi ý</Text>
+            <View style={s.dictationActionBtnInner}>
+              {IS_WEB ? (
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M9 18h6" />
+                  <path d="M10 22h4" />
+                  <path d="M12 2a7 7 0 0 1 4 12.7V17H8v-2.3A7 7 0 0 1 12 2z" />
+                </svg>
+              ) : null}
+              <Text style={s.dictationActionBtnText}>Gợi ý</Text>
+            </View>
+            {IS_WEB && isWide && <Text style={s.shortcutHint}>↓</Text>}
           </TouchableOpacity>
           <TouchableOpacity style={s.dictationActionBtn} onPress={() => setShowDictationAnswer(!showDictationAnswer)}>
-            <Text style={s.dictationActionBtnText}>
-              {showDictationAnswer ? '👁 Ẩn đáp án' : '👁 Hiện đáp án'}
-            </Text>
+            <View style={s.dictationActionBtnInner}>
+              {IS_WEB ? (
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              ) : null}
+              <Text style={s.dictationActionBtnText}>{showDictationAnswer ? 'Ẩn đáp án' : 'Hiện đáp án'}</Text>
+            </View>
+            {IS_WEB && isWide && <Text style={s.shortcutHint}>↑</Text>}
           </TouchableOpacity>
           <TouchableOpacity style={s.dictationActionBtn} onPress={() => {
             setDictationInput('');
             setIsDictationChecked(false);
           }}>
-            <Text style={s.dictationActionBtnText}>🧹 Xóa</Text>
+            <View style={s.dictationActionBtnInner}>
+              {IS_WEB ? (
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                </svg>
+              ) : null}
+              <Text style={s.dictationActionBtnText}>Xóa</Text>
+            </View>
+            {IS_WEB && isWide && <Text style={s.shortcutHint}>Esc</Text>}
           </TouchableOpacity>
         </View>
 
@@ -1109,6 +1245,9 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     );
 
     setIsTranslationChecked(true);
+    if (pct === 100) {
+      translationInputRef.current?.blur?.();
+    }
   };
 
   const handleTranslationHint = () => {
@@ -1133,6 +1272,15 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
       setTranslationInput(updatedInput);
       setIsTranslationChecked(false);
     }
+  };
+
+  // ── Update shortcut actions ref (MUST be after all handlers are defined) ──
+  shortcutActionsRef.current = {
+    activeTab,
+    hintDictation: handleDictationHint,
+    hintTranslation: handleTranslationHint,
+    showDictAnswer: showDictationAnswer,
+    showTransAnswer: showTranslationAnswer,
   };
 
   const renderTranslation = () => {
@@ -1163,12 +1311,17 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
     // Build word-by-word rendering for answer display
     const wordRender = showTranslationAnswer ? (
       <View style={{ width: '100%', alignItems: 'center', gap: 6 }}>
-        <Text style={[s.heroTranscript, isWide && s.heroTranscriptWide, { color: '#a78bfa' }]}>
+        <Text style={[s.heroTranscript, isWide && s.heroTranscriptWide, { color: '#a78bfa', textAlign: 'center' }]}>
           {targetText}
         </Text>
         {activeSegment.ipa ? (
-          <Text style={[s.heroIpa, isWide && s.heroIpaWide]}>
+          <Text style={[s.heroIpa, isWide && s.heroIpaWide, { textAlign: 'center' }]}>
             {activeSegment.ipa}
+          </Text>
+        ) : null}
+        {activeSegment.translation ? (
+          <Text style={[s.heroTranslation, isWide && s.heroTranslationWide, { textAlign: 'center', marginTop: 4 }]}>
+            {activeSegment.translation}
           </Text>
         ) : null}
       </View>
@@ -1232,6 +1385,7 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
 
         {/* Input */}
         <TextInput
+          ref={translationInputRef}
           style={s.dictationInput}
           placeholder="Gõ câu tiếng Anh tại đây..."
           placeholderTextColor="#4b5563"
@@ -1249,21 +1403,55 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
         {/* Action buttons */}
         <View style={s.dictationActions}>
           <TouchableOpacity style={[s.dictationActionBtn, { borderColor: '#7c3aed' }]} onPress={handleCheckTranslation}>
-            <Text style={[s.dictationActionBtnText, { color: '#c4b5fd' }]}>🔍 Kiểm tra</Text>
+            <View style={s.dictationActionBtnInner}>
+              {IS_WEB ? (
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <circle cx="11" cy="11" r="8" />
+                  <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+              ) : null}
+              <Text style={[s.dictationActionBtnText, { color: '#c4b5fd' }]}>Kiểm tra</Text>
+            </View>
+            {IS_WEB && isWide && <Text style={s.shortcutHint}>Enter</Text>}
           </TouchableOpacity>
           <TouchableOpacity style={s.dictationActionBtn} onPress={handleTranslationHint}>
-            <Text style={s.dictationActionBtnText}>💡 Gợi ý</Text>
+            <View style={s.dictationActionBtnInner}>
+              {IS_WEB ? (
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M9 18h6" />
+                  <path d="M10 22h4" />
+                  <path d="M12 2a7 7 0 0 1 4 12.7V17H8v-2.3A7 7 0 0 1 12 2z" />
+                </svg>
+              ) : null}
+              <Text style={s.dictationActionBtnText}>Gợi ý</Text>
+            </View>
+            {IS_WEB && isWide && <Text style={s.shortcutHint}>↓</Text>}
           </TouchableOpacity>
           <TouchableOpacity style={s.dictationActionBtn} onPress={() => setShowTranslationAnswer(!showTranslationAnswer)}>
-            <Text style={s.dictationActionBtnText}>
-              {showTranslationAnswer ? '👁 Ẩn đáp án' : '👁 Hiện đáp án'}
-            </Text>
+            <View style={s.dictationActionBtnInner}>
+              {IS_WEB ? (
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              ) : null}
+              <Text style={s.dictationActionBtnText}>{showTranslationAnswer ? 'Ẩn đáp án' : 'Hiện đáp án'}</Text>
+            </View>
+            {IS_WEB && isWide && <Text style={s.shortcutHint}>↑</Text>}
           </TouchableOpacity>
           <TouchableOpacity style={s.dictationActionBtn} onPress={() => {
             setTranslationInput('');
             setIsTranslationChecked(false);
           }}>
-            <Text style={s.dictationActionBtnText}>🧹 Xóa</Text>
+            <View style={s.dictationActionBtnInner}>
+              {IS_WEB ? (
+                <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                </svg>
+              ) : null}
+              <Text style={s.dictationActionBtnText}>Xóa</Text>
+            </View>
+            {IS_WEB && isWide && <Text style={s.shortcutHint}>Esc</Text>}
           </TouchableOpacity>
         </View>
 
@@ -1448,7 +1636,17 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
               activeOpacity={0.7}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Text style={[s.heroTabTxt, activeTab === 'shadowing' && s.heroTabTxtActive]}>🎧 Nghe</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                {IS_WEB ? (
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill={activeTab === 'shadowing' ? '#c4b5fd' : 'none'} stroke={activeTab === 'shadowing' ? '#c4b5fd' : '#555'} strokeWidth="2" strokeLinecap="round" style={{ display: 'block' } as any}>
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" fill="none" />
+                    <line x1="12" y1="19" x2="12" y2="23" />
+                    <line x1="8" y1="23" x2="16" y2="23" />
+                  </svg>
+                ) : null}
+                <Text style={[s.heroTabTxt, activeTab === 'shadowing' && s.heroTabTxtActive]}>Nghe</Text>
+              </View>
             </TouchableOpacity>
             <TouchableOpacity
               style={[s.heroTab, activeTab === 'dictation' && s.heroTabActive]}
@@ -1456,7 +1654,14 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
               activeOpacity={0.7}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Text style={[s.heroTabTxt, activeTab === 'dictation' && s.heroTabTxtActive]}>✍️ Chính tả</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                {IS_WEB ? (
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={activeTab === 'dictation' ? '#34d399' : '#555'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                    <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                  </svg>
+                ) : null}
+                <Text style={[s.heroTabTxt, activeTab === 'dictation' && s.heroTabTxtActive]}>Chính tả</Text>
+              </View>
             </TouchableOpacity>
             <TouchableOpacity
               style={[s.heroTab, activeTab === 'translation' && s.heroTabActive]}
@@ -1464,7 +1669,19 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
               activeOpacity={0.7}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Text style={[s.heroTabTxt, activeTab === 'translation' && s.heroTabTxtActive]}>🔄 Dịch câu</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                {IS_WEB ? (
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={activeTab === 'translation' ? '#2dd4bf' : '#555'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                    <path d="M5 8l6 6" />
+                    <path d="M4 14l6-6 2-3" />
+                    <path d="M2 5h12" />
+                    <path d="M7 2h1" />
+                    <path d="M22 22l-5-10-5 10" />
+                    <path d="M14 18h6" />
+                  </svg>
+                ) : null}
+                <Text style={[s.heroTabTxt, activeTab === 'translation' && s.heroTabTxtActive]}>Dịch câu</Text>
+              </View>
             </TouchableOpacity>
           </View>
         )}
@@ -1639,32 +1856,38 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
 
       {/* ── PLAYBACK CONTROLS ── */}
       <View style={s.ctrlRow}>
-        <TouchableOpacity style={s.ctrlBtn} onPress={handlePrev}>
-          <MaterialPrevIcon />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[s.playBtn, audioLoadFailed && { backgroundColor: '#92400e', borderColor: '#f59e0b' }]}
-          onPress={handlePlayPause}
-        >
-          {audioLoadFailed ? (
-            IS_WEB ? (
-              <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                <line x1="12" y1="11" x2="12" y2="17" />
-                <polyline points="9 14 12 11 15 14" />
-              </svg>
+        <View style={{ alignItems: 'center' }}>
+          <TouchableOpacity style={s.ctrlBtn} onPress={handlePrev}>
+            <MaterialPrevIcon />
+          </TouchableOpacity>
+        </View>
+        <View style={{ alignItems: 'center' }}>
+          <TouchableOpacity
+            style={[s.playBtn, audioLoadFailed && { backgroundColor: '#92400e', borderColor: '#f59e0b' }]}
+            onPress={handlePlayPause}
+          >
+            {audioLoadFailed ? (
+              IS_WEB ? (
+                <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  <line x1="12" y1="11" x2="12" y2="17" />
+                  <polyline points="9 14 12 11 15 14" />
+                </svg>
+              ) : (
+                <Text style={{ color: '#fbbf24', fontSize: 20, fontWeight: '800' }}>📂</Text>
+              )
+            ) : isAudioLoading ? (
+              <ActivityIndicator size="small" color="#fff" />
             ) : (
-              <Text style={{ color: '#fbbf24', fontSize: 20, fontWeight: '800' }}>📂</Text>
-            )
-          ) : isAudioLoading ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <MaterialPlayPauseIcon isPlaying={isPlaying} />
-          )}
-        </TouchableOpacity>
-        <TouchableOpacity style={s.ctrlBtn} onPress={handleNext}>
-          <MaterialNextIcon />
-        </TouchableOpacity>
+              <MaterialPlayPauseIcon isPlaying={isPlaying} />
+            )}
+          </TouchableOpacity>
+        </View>
+        <View style={{ alignItems: 'center' }}>
+          <TouchableOpacity style={s.ctrlBtn} onPress={handleNext}>
+            <MaterialNextIcon />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Warning banner when audio not found */}
@@ -1856,7 +2079,19 @@ export default function PlayerScreen({ project: initialProject, onBack, onOpenRe
   const renderTimeline = () => (
     <View style={[s.timelineCol, isWide && s.timelineColWide]}>
       <View style={s.tlHeader}>
-        <Text style={s.tlTitle}>📚 Danh sách câu</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {IS_WEB ? (
+            <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="#e0e0f0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' } as any}>
+              <line x1="8" y1="6" x2="21" y2="6" />
+              <line x1="8" y1="12" x2="21" y2="12" />
+              <line x1="8" y1="18" x2="21" y2="18" />
+              <line x1="3" y1="6" x2="3.01" y2="6" />
+              <line x1="3" y1="12" x2="3.01" y2="12" />
+              <line x1="3" y1="18" x2="3.01" y2="18" />
+            </svg>
+          ) : null}
+          <Text style={s.tlTitle}>Danh sách câu</Text>
+        </View>
         <Text style={s.tlCount}>{segments.length} câu</Text>
       </View>
       <FlatList
@@ -3133,8 +3368,9 @@ const s = StyleSheet.create({
   // ─── MODAL ───
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(0,0,0,0.45)',
     justifyContent: 'flex-end',
+    ...(IS_WEB ? { backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' } as any : {}),
   },
   modalDismiss: {
     flex: 1,
@@ -3283,7 +3519,9 @@ const s = StyleSheet.create({
     marginTop: 16,
   },
   dictationActionBtn: {
-    paddingVertical: 6,
+    flexDirection: 'row',
+    gap: 6,
+    paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 8,
     backgroundColor: '#18182c',
@@ -3297,6 +3535,25 @@ const s = StyleSheet.create({
     color: '#999',
     fontSize: 11,
     fontWeight: '700',
+  },
+  dictationActionBtnInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  shortcutHint: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: 9,
+    fontWeight: '700',
+    textAlign: 'center' as any,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    alignSelf: 'center',
+    overflow: 'hidden',
   },
   dictationCompleteMsg: {
     color: '#10b981',
